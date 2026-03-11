@@ -1,0 +1,2 @@
+[console_scripts]
+dfg = dfg.cli:main
