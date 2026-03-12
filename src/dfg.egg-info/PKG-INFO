@@ -1,5 +1,5 @@
 Metadata-Version: 2.4
-Name: data-forge
+Name: dfg
 Version: 0.1.0
 Summary: A vanilla Python ELT framework
 Requires-Python: >=3.11

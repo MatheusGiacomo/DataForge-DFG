@@ -1,36 +1,53 @@
+# src/dfg/cli.py (Trecho Atualizado)
 import argparse
-import os
 import sys
-from dfg.engine import DFGEngine
+import os
+from dfg.logger import logger
+from dfg.initialization import init_command
+from dfg.debug import debug_command # <-- Nova importação
+from dfg.docs import docs_command
+
+def run_command(args):
+    from dfg.engine import DFGEngine
+    engine = DFGEngine(project_dir=os.getcwd())
+    engine.run()
+
+def test_command(args):
+    from dfg.engine import DFGEngine
+    engine = DFGEngine(project_dir=os.getcwd())
+    engine.test() # <-- Chama a nossa nova rotina de Data Contracts
+
+COMMANDS = {
+    "init": init_command,
+    "run": run_command,
+    "test": test_command,
+    "debug": debug_command,
+    "docs": docs_command  # <-- Novo comando engatilhado
+}
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Data Forge (DFG) - Ferramenta de ELT baseada em Python.",
-        prog="dfg"
-    )
-    
+    parser = argparse.ArgumentParser(description="Data Forge (DFG)", prog="dfg")
     subparsers = parser.add_subparsers(dest="command", help="Comandos disponíveis")
-
-    # Comando: dfg run
-    subparsers.add_parser("run", help="Executa os modelos do projeto DFG")
     
-    # Comando: dfg test (Agora no lugar certo)
-    subparsers.add_parser("test", help="Testa os modelos do projeto DFG")
+    subparsers.add_parser("init", help="Inicializa um novo projeto DFG")
+    subparsers.add_parser("run", help="Executa os modelos do projeto DFG")
+    subparsers.add_parser("test", help="Testa a integridade dos modelos (Data Contracts)")
+    subparsers.add_parser("debug", help="Verifica as configurações e conexão com o banco")
+    subparsers.add_parser("docs", help="Gera a documentação e linhagem dos modelos")
     
     args = parser.parse_args()
-    current_dir = os.getcwd()
-
-    if args.command == "run":
-        try:
-            engine = DFGEngine(project_dir=current_dir)
-            engine.run()
-        except Exception as e:
-            print(f"\n[ERRO FATAL] {e}")
-            sys.exit(1)
-    elif args.command == "test":
-        print("Comando 'test' ainda não implementado. Em breve!")
-    else:
+    
+    if not args.command:
         parser.print_help()
+        sys.exit(0)
+        
+    handler = COMMANDS.get(args.command)
+    if handler:
+        try:
+            handler(args)
+        except Exception as e:
+            logger.error(f"Erro fatal: {e}")
+            sys.exit(1)
 
 if __name__ == "__main__":
     main()

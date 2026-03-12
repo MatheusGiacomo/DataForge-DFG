@@ -4,6 +4,11 @@ from dfg.logger import logger
 # Este modelo não depende de outros modelos locais
 DEPENDENCIES = []
 
+CONTRACT = {
+    "id": ["not_null", "unique"],
+    "email": ["not_null"],
+}
+
 def model(context):
     """
     Extrai usuários de uma API e mantém o estado do último ID processado.

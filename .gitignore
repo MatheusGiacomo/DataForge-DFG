@@ -1,2 +1,7 @@
 /.venv
 /.vscode
+__pycache__
+catalog
+teste
+/tests_first_project
+/dfg.egg-info

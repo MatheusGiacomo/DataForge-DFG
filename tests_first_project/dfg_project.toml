@@ -1,16 +1,4 @@
 [project]
-name = "MeuPrimeiroProjeto"
-target = "dev"  # Mude aqui para "prod" se quiser testar o Postgres
-
-[targets.dev]
-type = "duckdb"
-database = "meu_projeto.db"  # Apenas isso para DuckDB
-
-[targets.prod]
-type = "postgres"
-host = "localhost"
-port = 5432
-user = "seu_usuario"
-password = "sua_password"
-database = "seu_banco"
-schema = "public"
+name = "meu_projeto"
+profile = "meu_projeto"
+target = "dev"
