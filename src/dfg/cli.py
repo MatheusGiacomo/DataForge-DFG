@@ -6,6 +6,7 @@ from dfg.logger import logger
 from dfg.initialization import init_command
 from dfg.debug import debug_command # <-- Nova importação
 from dfg.docs import docs_command
+from dfg.compile import compile_command
 
 def run_command(args):
     from dfg.engine import DFGEngine
@@ -22,7 +23,8 @@ COMMANDS = {
     "run": run_command,
     "test": test_command,
     "debug": debug_command,
-    "docs": docs_command  # <-- Novo comando engatilhado
+    "docs": docs_command,
+    "compile": compile_command
 }
 
 def main():
@@ -34,6 +36,7 @@ def main():
     subparsers.add_parser("test", help="Testa a integridade dos modelos (Data Contracts)")
     subparsers.add_parser("debug", help="Verifica as configurações e conexão com o banco")
     subparsers.add_parser("docs", help="Gera a documentação e linhagem dos modelos")
+    subparsers.add_parser("compile", help="Gera os arquivos SQL finais sem executá-los no banco (Dry Run)")
     
     args = parser.parse_args()
     
