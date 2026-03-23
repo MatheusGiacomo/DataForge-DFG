@@ -1,7 +1,7 @@
 # src/dfg/state.py
 import json
 import os
-from dfg.logger import logger
+from dfg.logging import logger
 
 class StateManager:
     def __init__(self, project_dir):

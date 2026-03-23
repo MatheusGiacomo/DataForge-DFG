@@ -2,7 +2,7 @@
 import sys
 import os
 from datetime import datetime
-from dfg.logger import logger
+from dfg.logging import logger
 from dfg.engine import DFGEngine
 
 def docs_command(args):

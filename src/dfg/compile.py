@@ -1,7 +1,7 @@
 # src/dfg/compile.py
 import sys
 import os
-from dfg.logger import logger
+from dfg.logging import logger
 from dfg.engine import DFGEngine
 
 def compile_command(args):

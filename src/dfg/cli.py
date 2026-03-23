@@ -2,7 +2,7 @@
 import argparse
 import sys
 import os
-from dfg.logger import logger
+from dfg.logging import logger
 from dfg.initialization import init_command
 from dfg.debug import debug_command # <-- Nova importação
 from dfg.docs import docs_command

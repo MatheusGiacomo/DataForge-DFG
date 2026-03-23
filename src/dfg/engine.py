@@ -3,9 +3,10 @@ import importlib.util
 import os
 import sys
 import re
+import time
 from dfg.dag import DAGResolver
 from dfg.adapters.factory import AdapterFactory
-from dfg.logger import logger
+from dfg.logging import logger
 from dfg.state import StateManager 
 
 # Regex para capturar os padrões do dbt
@@ -15,6 +16,11 @@ REF_PATTERN = re.compile(r"\{\{\s*ref\('([^']+)'\)\s*\}\}")
 class DFGEngine:
     def __init__(self, project_dir: str):
         self.project_dir = project_dir
+        
+        # Inicializa o logger centralizado (Terminal + Arquivo .log)
+        logger.setup(self.project_dir)
+        logger.forge("Inicializando Forja de Dados...")
+        
         self.config = self._load_config()
         self.models_dir = os.path.join(self.project_dir, "models")
         self.models_registry = {}
@@ -31,9 +37,11 @@ class DFGEngine:
         if not os.path.exists(profiles_toml_path):
             raise FileNotFoundError("Arquivo profiles.toml não encontrado na raiz do projeto.")
 
+        logger.debug(f"Lendo configurações do projeto em: {project_toml_path}")
         with open(project_toml_path, "rb") as f:
             config = tomllib.load(f)
             
+        logger.debug(f"Lendo configurações do profile em: {profiles_toml_path}")
         with open(profiles_toml_path, "rb") as f:
             profiles = tomllib.load(f)
             
@@ -46,10 +54,12 @@ class DFGEngine:
         except KeyError:
             raise ValueError(f"Target '{target_name}' não encontrado no profile '{profile_name}' em profiles.toml")
             
+        logger.success(f"Configuração carregada. Profile: '{profile_name}', Target: '{target_name}'")
         return config
 
     def discover_models(self):
-        logger.info("Escaneando diretório de modelos (Python e SQL)...")
+        logger.forge("Escaneando diretório de modelos (Python e SQL)...")
+        start_time = time.time()
         
         for filename in os.listdir(self.models_dir):
             if filename == "__init__.py": continue
@@ -89,13 +99,20 @@ class DFGEngine:
                 }
                 self.dependencies_map[model_name] = deps
 
-        logger.success(f"{len(self.models_registry)} modelos carregados no Grafo.")
+        end_time = time.time()
+        logger.success(f"discover_models() finalizado com êxito em {(end_time - start_time):.3f} segundos.")
+        logger.info(f"{len(self.models_registry)} modelos carregados no Grafo.")
 
     def run(self):
+        start_run = time.time()
+        
         target_name = self.config["project"]["target"]
         target_config = self.config["targets"][target_name]
         
         logger.info(f"Iniciando Pipeline no ambiente: {target_name.upper()}")
+        
+        driver_name = target_config.get("type", "unknown")
+        logger.debug(f"Tentando estabelecer conexão usando driver: '{driver_name}'...")
         
         adapter = AdapterFactory.get_adapter(target_config["type"])
         adapter.connect(target_config)
@@ -108,7 +125,6 @@ class DFGEngine:
 
         for model_name in execution_order:
             if model_name not in self.models_registry: continue
-            logger.forge(model_name)
             
             model_content = self.models_registry[model_name]
             
@@ -117,6 +133,9 @@ class DFGEngine:
                 mat_type = model_content["materialized"].upper()
                 raw_sql = model_content["raw"]
                 compiled_sql = re.sub(REF_PATTERN, r"\1", raw_sql)
+                
+                logger.forge(f"Iniciando materialização do modelo SQL '{model_name}'...")
+                start_model = time.time()
                 
                 # Limpeza preventiva: remove se existir como table ou view
                 drop_queries = [
@@ -128,13 +147,17 @@ class DFGEngine:
                 try:
                     for drop in drop_queries: adapter.execute(drop)
                     adapter.execute(create_query)
-                    logger.success(f"Modelo SQL {model_name} materializado como {mat_type}.")
+                    end_model = time.time()
+                    logger.success(f"Modelo SQL '{model_name}' materializado como {mat_type} em {(end_model - start_model):.3f} segundos.")
                 except Exception as e:
                     logger.error(f"Erro ao materializar SQL {model_name}: {e}")
                     raise
                     
             # LÓGICA PYTHON
             else:
+                logger.forge(f"Iniciando extração do modelo Python '{model_name}'...")
+                start_model = time.time()
+                
                 context = {
                     "config": self.config,
                     "ref": lambda name: results_cache.get(name),
@@ -142,17 +165,24 @@ class DFGEngine:
                     "set_state": lambda val, m=model_name: self.state_manager.set(m, val)
                 }
                 
-                data = model_content(context)
-                results_cache[model_name] = data
-                
-                if data:
-                    target_schema = target_config.get("schema", "public")
-                    adapter.load_data(table_name=model_name, data=data, schema=target_schema)
-                    logger.success(f"Modelo Python {model_name} forjado com {len(data)} registros.")
-                else:
-                    logger.info(f"Modelo Python {model_name} não retornou novos dados.")
+                try:
+                    data = model_content(context)
+                    results_cache[model_name] = data
+                    
+                    if data:
+                        target_schema = target_config.get("schema", "public")
+                        adapter.load_data(table_name=model_name, data=data, schema=target_schema)
+                        end_model = time.time()
+                        logger.success(f"Modelo Python '{model_name}' forjado com {len(data)} registros em {(end_model - start_model):.3f} segundos.")
+                    else:
+                        end_model = time.time()
+                        logger.info(f"Modelo Python '{model_name}' não retornou novos dados ({(end_model - start_model):.3f}s).")
+                except Exception as e:
+                    logger.error(f"Erro fatal na extração do modelo Python '{model_name}': {e}")
+                    raise
 
-        logger.success("--- Forja finalizada com êxito! ---")
+        end_run = time.time()
+        logger.success(f"--- Forja finalizada com êxito em {(end_run - start_run):.3f} segundos! ---")
     
     def test(self):
         target_name = self.config["project"]["target"]
@@ -213,7 +243,6 @@ class DFGEngine:
                         else:
                             logger.success(f"  [PASSOU] {model_name}.{coluna} é único.")
                             
-        print("-" * 50)
         if erros_encontrados == 0:
             logger.success("Todos os contratos validados!")
         else:
@@ -226,7 +255,7 @@ class DFGEngine:
         sem executar nada no banco de dados.
         """
         import os
-        from dfg.logger import logger
+        from dfg.logging import logger
         
         logger.info("Iniciando compilação dos modelos (Dry Run)...")
         self.discover_models()

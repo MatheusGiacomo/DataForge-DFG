@@ -1,7 +1,7 @@
 # src/dfg/debug.py
 import sys
 import os
-from dfg.logger import logger
+from dfg.logging import logger
 from dfg.engine import DFGEngine
 from dfg.adapters.factory import AdapterFactory
 

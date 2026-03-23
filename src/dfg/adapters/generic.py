@@ -1,6 +1,6 @@
 # src/dfg/adapters/generic.py
 from dfg.adapters.base import BaseAdapter
-from dfg.logger import logger
+from dfg.logging import logger
 
 class GenericDBAPIAdapter(BaseAdapter):
     def __init__(self, driver_module):

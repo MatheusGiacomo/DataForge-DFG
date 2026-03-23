@@ -1,5 +1,5 @@
 import requests
-from dfg.logger import logger
+from dfg.logging import logger
 
 # Este modelo não depende de outros modelos locais
 DEPENDENCIES = []

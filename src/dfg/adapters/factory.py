@@ -1,7 +1,7 @@
 # src/dfg/adapters/factory.py
 import importlib
 from dfg.adapters.generic import GenericDBAPIAdapter
-from dfg.logger import logger
+from dfg.logging import logger
 
 class AdapterFactory:
     # Mapeamento de 'tipo no TOML' -> 'nome do módulo python'

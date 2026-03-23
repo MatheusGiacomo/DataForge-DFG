@@ -1,6 +1,6 @@
 # src/dfg/initialization.py
 import os
-from dfg.logger import logger
+from dfg.logging import logger
 
 # A Bigorna do Data Forge em ASCII Art (usando a cor azul do seu logger)
 ANVIL_ASCII = f"""{logger.BLUE}
