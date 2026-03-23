@@ -17,15 +17,15 @@ class DFGEngine:
     def __init__(self, project_dir: str):
         self.project_dir = project_dir
         
-        # Inicializa o logger centralizado (Terminal + Arquivo .log)
+        # Inicializa o logger centralizado
         logger.setup(self.project_dir)
-        logger.forge("Inicializando Forja de Dados...")
         
         self.config = self._load_config()
         self.models_dir = os.path.join(self.project_dir, "models")
         self.models_registry = {}
         self.dependencies_map = {}
         self.state_manager = StateManager(self.project_dir)
+        self.adapter = None # Será inicializado sob demanda
 
     def _load_config(self) -> dict:
         project_toml_path = os.path.join(self.project_dir, "dfg_project.toml")
@@ -37,11 +37,9 @@ class DFGEngine:
         if not os.path.exists(profiles_toml_path):
             raise FileNotFoundError("Arquivo profiles.toml não encontrado na raiz do projeto.")
 
-        logger.debug(f"Lendo configurações do projeto em: {project_toml_path}")
         with open(project_toml_path, "rb") as f:
             config = tomllib.load(f)
             
-        logger.debug(f"Lendo configurações do profile em: {profiles_toml_path}")
         with open(profiles_toml_path, "rb") as f:
             profiles = tomllib.load(f)
             
@@ -52,20 +50,36 @@ class DFGEngine:
             credentials = profiles[profile_name]["outputs"][target_name]
             config["targets"] = {target_name: credentials}
         except KeyError:
-            raise ValueError(f"Target '{target_name}' não encontrado no profile '{profile_name}' em profiles.toml")
+            raise ValueError(f"Target '{target_name}' não encontrado no profile '{profile_name}'")
             
         logger.success(f"Configuração carregada. Profile: '{profile_name}', Target: '{target_name}'")
         return config
 
+    def _get_adapter(self):
+        """Helper para garantir conexão com o banco sem repetir código"""
+        if self.adapter:
+            return self.adapter
+            
+        target_name = self.config["project"]["target"]
+        target_config = self.config["targets"][target_name]
+        
+        logger.debug(f"Estabelecendo conexão via driver: '{target_config.get('type')}'...")
+        self.adapter = AdapterFactory.get_adapter(target_config["type"])
+        self.adapter.connect(target_config)
+        return self.adapter
+
     def discover_models(self):
-        logger.forge("Escaneando diretório de modelos (Python e SQL)...")
+        """Escaneia arquivos e popula o registro e mapa de dependências"""
+        if self.models_registry: return # Evita re-escanear se já carregado
+
+        logger.forge("Escaneando diretório de modelos...")
         start_time = time.time()
         
         for filename in os.listdir(self.models_dir):
             if filename == "__init__.py": continue
             filepath = os.path.join(self.models_dir, filename)
             
-            # --- MODELOS PYTHON ---
+            # --- MODELOS PYTHON (Ingestão) ---
             if filename.endswith(".py"):
                 model_name = filename[:-3]
                 spec = importlib.util.spec_from_file_location(model_name, filepath)
@@ -73,23 +87,18 @@ class DFGEngine:
                 sys.modules[model_name] = module 
                 spec.loader.exec_module(module)
                 
-                self.models_registry[model_name] = module.model
+                self.models_registry[model_name] = {"type": "python", "func": module.model}
                 self.dependencies_map[model_name] = getattr(module, 'DEPENDENCIES', [])
 
-            # --- MODELOS SQL (Com Materialização) ---
+            # --- MODELOS SQL (Transformação) ---
             elif filename.endswith(".sql"):
                 model_name = filename[:-4]
                 with open(filepath, "r", encoding="utf-8") as f:
                     raw_sql = f.read()
                 
-                # Captura a configuração de materialização (default: table)
                 config_match = CONFIG_PATTERN.search(raw_sql)
                 materialization = config_match.group(1) if config_match else "table"
-                
-                # Remove a tag de config do SQL para não dar erro de sintaxe no banco
                 clean_sql = CONFIG_PATTERN.sub("", raw_sql).strip()
-                
-                # Extrai dependências via ref()
                 deps = REF_PATTERN.findall(clean_sql)
                 
                 self.models_registry[model_name] = {
@@ -99,65 +108,52 @@ class DFGEngine:
                 }
                 self.dependencies_map[model_name] = deps
 
-        end_time = time.time()
-        logger.success(f"discover_models() finalizado com êxito em {(end_time - start_time):.3f} segundos.")
-        logger.info(f"{len(self.models_registry)} modelos carregados no Grafo.")
+        logger.success(f"Modelos carregados em {(time.time() - start_time):.3f}s.")
 
-    def run(self):
-        start_run = time.time()
-        
-        target_name = self.config["project"]["target"]
-        target_config = self.config["targets"][target_name]
-        
-        logger.info(f"Iniciando Pipeline no ambiente: {target_name.upper()}")
-        
-        driver_name = target_config.get("type", "unknown")
-        logger.debug(f"Tentando estabelecer conexão usando driver: '{driver_name}'...")
-        
-        adapter = AdapterFactory.get_adapter(target_config["type"])
-        adapter.connect(target_config)
-        
+    def _execute_dag(self, filter_type=None):
+        """
+        Lógica central de execução que percorre o DAG.
+        filter_type: 'python' para ingestão, 'sql' para transformação, None para todos.
+        """
         self.discover_models()
+        adapter = self._get_adapter()
         resolver = DAGResolver(self.dependencies_map)
         execution_order = resolver.get_execution_order()
         
         results_cache = {}
+        success_count = 0
 
         for model_name in execution_order:
-            if model_name not in self.models_registry: continue
+            model_info = self.models_registry.get(model_name)
+            if not model_info: continue
             
-            model_content = self.models_registry[model_name]
+            # Se pedimos apenas um tipo (ingest ou transform), pulamos os outros
+            if filter_type and model_info["type"] != filter_type:
+                continue
+
+            start_model = time.time()
             
-            # LÓGICA SQL
-            if isinstance(model_content, dict) and model_content.get("type") == "sql":
-                mat_type = model_content["materialized"].upper()
-                raw_sql = model_content["raw"]
-                compiled_sql = re.sub(REF_PATTERN, r"\1", raw_sql)
+            # --- EXECUÇÃO SQL ---
+            if model_info["type"] == "sql":
+                mat_type = model_info["materialized"].upper()
+                compiled_sql = re.sub(REF_PATTERN, r"\1", model_info["raw"])
                 
-                logger.forge(f"Iniciando materialização do modelo SQL '{model_name}'...")
-                start_model = time.time()
-                
-                # Limpeza preventiva: remove se existir como table ou view
-                drop_queries = [
-                    f"DROP VIEW IF EXISTS {model_name} CASCADE;",
-                    f"DROP TABLE IF EXISTS {model_name} CASCADE;"
-                ]
+                logger.forge(f"Materializando SQL '{model_name}' ({mat_type})...")
+                drop_queries = [f"DROP VIEW IF EXISTS {model_name} CASCADE;", f"DROP TABLE IF EXISTS {model_name} CASCADE;"]
                 create_query = f"CREATE {mat_type} {model_name} AS \n{compiled_sql}"
                 
                 try:
                     for drop in drop_queries: adapter.execute(drop)
                     adapter.execute(create_query)
-                    end_model = time.time()
-                    logger.success(f"Modelo SQL '{model_name}' materializado como {mat_type} em {(end_model - start_model):.3f} segundos.")
+                    logger.success(f"Modelo SQL '{model_name}' pronto ({(time.time() - start_model):.3f}s).")
+                    success_count += 1
                 except Exception as e:
-                    logger.error(f"Erro ao materializar SQL {model_name}: {e}")
-                    raise
+                    logger.error(f"Erro no SQL {model_name}: {e}")
+                    return False
                     
-            # LÓGICA PYTHON
+            # --- EXECUÇÃO PYTHON ---
             else:
-                logger.forge(f"Iniciando extração do modelo Python '{model_name}'...")
-                start_model = time.time()
-                
+                logger.forge(f"Executando Ingestão Python '{model_name}'...")
                 context = {
                     "config": self.config,
                     "ref": lambda name: results_cache.get(name),
@@ -166,127 +162,97 @@ class DFGEngine:
                 }
                 
                 try:
-                    data = model_content(context)
+                    data = model_info["func"](context)
                     results_cache[model_name] = data
                     
                     if data:
-                        target_schema = target_config.get("schema", "public")
+                        target_schema = self.config["targets"][self.config["project"]["target"]].get("schema", "public")
                         adapter.load_data(table_name=model_name, data=data, schema=target_schema)
-                        end_model = time.time()
-                        logger.success(f"Modelo Python '{model_name}' forjado com {len(data)} registros em {(end_model - start_model):.3f} segundos.")
+                        logger.success(f"Ingestão '{model_name}' finalizada: {len(data)} registros ({(time.time() - start_model):.3f}s).")
                     else:
-                        end_model = time.time()
-                        logger.info(f"Modelo Python '{model_name}' não retornou novos dados ({(end_model - start_model):.3f}s).")
+                        logger.info(f"Ingestão '{model_name}' sem novos dados.")
+                    success_count += 1
                 except Exception as e:
-                    logger.error(f"Erro fatal na extração do modelo Python '{model_name}': {e}")
-                    raise
+                    logger.error(f"Erro na Ingestão {model_name}: {e}")
+                    return False
 
-        end_run = time.time()
-        logger.success(f"--- Forja finalizada com êxito em {(end_run - start_run):.3f} segundos! ---")
-    
+        return True if success_count > 0 else "no_work"
+
+    def ingest(self):
+        """Comando: dfg ingest"""
+        logger.info("Iniciando fase isolada de INGESTÃO (Modelos Python)...")
+        return self._execute_dag(filter_type="python")
+
+    def transform(self):
+        """Comando: dfg transform"""
+        logger.info("Iniciando fase isolada de TRANSFORMAÇÃO (Modelos SQL)...")
+        return self._execute_dag(filter_type="sql")
+
+    def run(self):
+        """Comando: dfg run (Orquestração Completa)"""
+        start_run = time.time()
+        logger.info(f"Iniciando Pipeline Completo no ambiente: {self.config['project']['target'].upper()}")
+        
+        if not self.ingest():
+            return False
+            
+        if not self.transform():
+            return False
+            
+        logger.success(f"--- Forja finalizada em {(time.time() - start_run):.3f}s! ---")
+        return True
+
     def test(self):
-        target_name = self.config["project"]["target"]
-        target_config = self.config["targets"][target_name]
-        
-        adapter = AdapterFactory.get_adapter(target_config["type"])
-        adapter.connect(target_config)
-        
+        """Executa os contratos de dados"""
+        adapter = self._get_adapter()
         self.discover_models()
-        
-        logger.info("\n--- Iniciando Validação de Contratos de Dados ---")
-        erros_encontrados = 0
+        logger.info("\n--- Iniciando Validação de Contratos ---")
+        erros = 0
         
         for model_name, model_info in self.models_registry.items():
-            # Pegamos o contrato apenas de modelos Python (os SQLs ainda não possuem contrato definido)
-            if callable(model_info):
-                module = sys.modules.get(model_name)
-                contract = getattr(module, 'CONTRACT', None)
-            else:
-                # Opcional: Futuramente adicionar leitura de contratos para SQL via YAML
-                contract = None
+            # Tenta pegar contrato do módulo Python associado
+            module = sys.modules.get(model_name)
+            contract = getattr(module, 'CONTRACT', None) if module else None
             
             if not contract:
-                logger.warn(f"Modelo '{model_name}': Nenhum contrato (CONTRACT) definido. Pulando.")
+                logger.warn(f"Modelo '{model_name}': Sem contrato definido. Pulando.")
                 continue
                 
             logger.forge(f"Testando '{model_name}'...")
-            
             try:
-                count_res = adapter.execute(f"SELECT COUNT(*) FROM {model_name}")
-                count_total = count_res[0][0] if count_res else 0
-                if count_total == 0:
-                    logger.warn(f"  [AVISO] A tabela '{model_name}' está vazia.")
-            except Exception:
-                logger.error(f"  [ERRO] Tabela '{model_name}' não encontrada.")
-                erros_encontrados += 1
-                continue
+                # Validação básica de existência
+                res = adapter.execute(f"SELECT COUNT(*) FROM {model_name}")
+                if not res or res[0][0] == 0: logger.warn(f"  [AVISO] '{model_name}' está vazia.")
+                
+                for coluna, testes in contract.items():
+                    for teste in testes:
+                        if teste == "not_null":
+                            nulos = adapter.execute(f"SELECT COUNT(*) FROM {model_name} WHERE {coluna} IS NULL")[0][0]
+                            if nulos > 0:
+                                logger.error(f"  [FALHA] {model_name}.{coluna}: {nulos} nulos!")
+                                erros += 1
+                        elif teste == "unique":
+                            dups = adapter.execute(f"SELECT COUNT(*) FROM (SELECT {coluna} FROM {model_name} GROUP BY {coluna} HAVING COUNT(*) > 1) AS s")[0][0]
+                            if dups > 0:
+                                logger.error(f"  [FALHA] {model_name}.{coluna}: Duplicatas detectadas!")
+                                erros += 1
+            except Exception as e:
+                logger.error(f" Erro ao testar {model_name}: {e}")
+                erros += 1
 
-            for coluna, testes in contract.items():
-                for teste in testes:
-                    if teste == "not_null":
-                        query = f"SELECT COUNT(*) FROM {model_name} WHERE {coluna} IS NULL"
-                        res = adapter.execute(query)
-                        nulos = res[0][0] if res else 0
-                        if nulos > 0:
-                            logger.error(f"  [FALHA] {model_name}.{coluna}: {nulos} nulos encontrados!")
-                            erros_encontrados += 1
-                        else:
-                            logger.success(f"  [PASSOU] {model_name}.{coluna} sem nulos.")
-                            
-                    elif teste == "unique":
-                        query = f"SELECT COUNT(*) FROM (SELECT {coluna} FROM {model_name} GROUP BY {coluna} HAVING COUNT(*) > 1) AS sub"
-                        res = adapter.execute(query)
-                        duplicatas = res[0][0] if res else 0
-                        if duplicatas > 0:
-                            logger.error(f"  [FALHA] {model_name}.{coluna}: duplicatas detectadas!")
-                            erros_encontrados += 1
-                        else:
-                            logger.success(f"  [PASSOU] {model_name}.{coluna} é único.")
-                            
-        if erros_encontrados == 0:
-            logger.success("Todos os contratos validados!")
-        else:
-            logger.error(f"Validação encerrada com {erros_encontrados} erro(s).")
-            sys.exit(1)
-    
+        if erros > 0: sys.exit(1)
+        logger.success("Todos os contratos validados!")
+
     def compile(self):
-        """
-        Realiza o Dry Run: resolve os templates e salva os SQLs puros na pasta target/
-        sem executar nada no banco de dados.
-        """
-        import os
-        from dfg.logging import logger
-        
-        logger.info("Iniciando compilação dos modelos (Dry Run)...")
+        """Gera SQLs compilados na pasta target/"""
+        logger.info("Compilando modelos (Dry Run)...")
         self.discover_models()
-        
-        # Cria a pasta de artefatos (como o dbt faz)
         compiled_dir = os.path.join(self.project_dir, "target", "compiled")
         os.makedirs(compiled_dir, exist_ok=True)
         
-        sql_models_count = 0
-        
-        for model_name, model_content in self.models_registry.items():
-            # A compilação faz sentido apenas para os modelos SQL
-            if isinstance(model_content, dict) and model_content.get("type") == "sql":
-                raw_sql = model_content["raw"]
-                mat_type = model_content.get("materialized", "table").upper()
-                
-                # Resolve a mágica do DFG (as funções ref)
-                compiled_sql = re.sub(REF_PATTERN, r"\1", raw_sql)
-                
-                # Prepara o arquivo final
-                output_path = os.path.join(compiled_dir, f"{model_name}.sql")
-                
-                with open(output_path, "w", encoding="utf-8") as f:
-                    f.write(f"-- [Data Forge] Artefato Compilado\n")
-                    f.write(f"-- Materialização configurada: {mat_type}\n\n")
-                    f.write(compiled_sql)
-                    
-                logger.success(f"Compilado: {model_name}.sql -> {output_path}")
-                sql_models_count += 1
-                
-        if sql_models_count == 0:
-            logger.warn("Nenhum modelo SQL encontrado para compilar.")
-        else:
-            logger.info(f"Total de {sql_models_count} modelo(s) compilado(s) em 'target/compiled/'.")
+        for name, info in self.models_registry.items():
+            if info["type"] == "sql":
+                compiled_sql = re.sub(REF_PATTERN, r"\1", info["raw"])
+                with open(os.path.join(compiled_dir, f"{name}.sql"), "w", encoding="utf-8") as f:
+                    f.write(f"-- Materialização: {info['materialized'].upper()}\n{compiled_sql}")
+                logger.success(f"Compilado: {name}.sql")
