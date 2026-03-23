@@ -1,3 +1,4 @@
+# src/dfg/engine.py
 import tomllib
 import importlib.util
 import os
@@ -8,6 +9,7 @@ from dfg.dag import DAGResolver
 from dfg.adapters.factory import AdapterFactory
 from dfg.logging import logger
 from dfg.state import StateManager 
+from dfg.artifacts import ArtifactManager
 
 # Regex para capturar os padrões do dbt
 CONFIG_PATTERN = re.compile(r"\{\{\s*config\(\s*materialized\s*=\s*'([^']+)'\s*\)\s*\}\}")
@@ -17,15 +19,16 @@ class DFGEngine:
     def __init__(self, project_dir: str):
         self.project_dir = project_dir
         
-        # Inicializa o logger centralizado
+        # Inicializa o logger e o gerenciador de artefatos
         logger.setup(self.project_dir)
+        self.artifact_manager = ArtifactManager(self.project_dir)
         
         self.config = self._load_config()
         self.models_dir = os.path.join(self.project_dir, "models")
         self.models_registry = {}
         self.dependencies_map = {}
         self.state_manager = StateManager(self.project_dir)
-        self.adapter = None # Será inicializado sob demanda
+        self.adapter = None 
 
     def _load_config(self) -> dict:
         project_toml_path = os.path.join(self.project_dir, "dfg_project.toml")
@@ -56,7 +59,6 @@ class DFGEngine:
         return config
 
     def _get_adapter(self):
-        """Helper para garantir conexão com o banco sem repetir código"""
         if self.adapter:
             return self.adapter
             
@@ -70,7 +72,7 @@ class DFGEngine:
 
     def discover_models(self):
         """Escaneia arquivos e popula o registro e mapa de dependências"""
-        if self.models_registry: return # Evita re-escanear se já carregado
+        if self.models_registry: return 
 
         logger.forge("Escaneando diretório de modelos...")
         start_time = time.time()
@@ -79,7 +81,6 @@ class DFGEngine:
             if filename == "__init__.py": continue
             filepath = os.path.join(self.models_dir, filename)
             
-            # --- MODELOS PYTHON (Ingestão) ---
             if filename.endswith(".py"):
                 model_name = filename[:-3]
                 spec = importlib.util.spec_from_file_location(model_name, filepath)
@@ -90,7 +91,6 @@ class DFGEngine:
                 self.models_registry[model_name] = {"type": "python", "func": module.model}
                 self.dependencies_map[model_name] = getattr(module, 'DEPENDENCIES', [])
 
-            # --- MODELOS SQL (Transformação) ---
             elif filename.endswith(".sql"):
                 model_name = filename[:-4]
                 with open(filepath, "r", encoding="utf-8") as f:
@@ -110,97 +110,124 @@ class DFGEngine:
 
         logger.success(f"Modelos carregados em {(time.time() - start_time):.3f}s.")
 
-    def _execute_dag(self, filter_type=None):
+    def _execute_dag(self, filter_type=None, command_name="run"):
         """
-        Lógica central de execução que percorre o DAG.
-        filter_type: 'python' para ingestão, 'sql' para transformação, None para todos.
+        Lógica central de execução com coleta de metadados para artefatos.
         """
         self.discover_models()
+        
+        # 1. Gera o Manifest (Planta do Projeto) antes de começar a execução
+        self.artifact_manager.save_manifest(self.models_registry, self.dependencies_map)
+        
         adapter = self._get_adapter()
         resolver = DAGResolver(self.dependencies_map)
         execution_order = resolver.get_execution_order()
         
         results_cache = {}
         success_count = 0
+        run_results_log = [] # Lista de dicionários para o run_results.json
 
         for model_name in execution_order:
             model_info = self.models_registry.get(model_name)
             if not model_info: continue
             
-            # Se pedimos apenas um tipo (ingest ou transform), pulamos os outros
+            # Filtro de tipo (ingest vs transform)
             if filter_type and model_info["type"] != filter_type:
+                run_results_log.append({
+                    "model": model_name, 
+                    "status": "skipped", 
+                    "execution_time": 0
+                })
                 continue
 
             start_model = time.time()
+            status = "error"
+            error_msg = None
+            rows_affected = 0
             
-            # --- EXECUÇÃO SQL ---
-            if model_info["type"] == "sql":
-                mat_type = model_info["materialized"].upper()
-                compiled_sql = re.sub(REF_PATTERN, r"\1", model_info["raw"])
-                
-                logger.forge(f"Materializando SQL '{model_name}' ({mat_type})...")
-                drop_queries = [f"DROP VIEW IF EXISTS {model_name} CASCADE;", f"DROP TABLE IF EXISTS {model_name} CASCADE;"]
-                create_query = f"CREATE {mat_type} {model_name} AS \n{compiled_sql}"
-                
-                try:
+            try:
+                # --- EXECUÇÃO SQL ---
+                if model_info["type"] == "sql":
+                    mat_type = model_info["materialized"].upper()
+                    compiled_sql = re.sub(REF_PATTERN, r"\1", model_info["raw"])
+                    
+                    logger.forge(f"Materializando SQL '{model_name}' ({mat_type})...")
+                    drop_queries = [f"DROP VIEW IF EXISTS {model_name} CASCADE;", f"DROP TABLE IF EXISTS {model_name} CASCADE;"]
+                    create_query = f"CREATE {mat_type} {model_name} AS \n{compiled_sql}"
+                    
                     for drop in drop_queries: adapter.execute(drop)
                     adapter.execute(create_query)
-                    logger.success(f"Modelo SQL '{model_name}' pronto ({(time.time() - start_model):.3f}s).")
-                    success_count += 1
-                except Exception as e:
-                    logger.error(f"Erro no SQL {model_name}: {e}")
-                    return False
                     
-            # --- EXECUÇÃO PYTHON ---
-            else:
-                logger.forge(f"Executando Ingestão Python '{model_name}'...")
-                context = {
-                    "config": self.config,
-                    "ref": lambda name: results_cache.get(name),
-                    "state": self.state_manager.get(model_name),
-                    "set_state": lambda val, m=model_name: self.state_manager.set(m, val)
-                }
-                
-                try:
+                    status = "success"
+                    success_count += 1
+                        
+                # --- EXECUÇÃO PYTHON ---
+                else:
+                    logger.forge(f"Executando Ingestão Python '{model_name}'...")
+                    context = {
+                        "config": self.config,
+                        "ref": lambda name: results_cache.get(name),
+                        "state": self.state_manager.get(model_name),
+                        "set_state": lambda val, m=model_name: self.state_manager.set(m, val)
+                    }
+                    
                     data = model_info["func"](context)
                     results_cache[model_name] = data
                     
                     if data:
+                        rows_affected = len(data)
                         target_schema = self.config["targets"][self.config["project"]["target"]].get("schema", "public")
                         adapter.load_data(table_name=model_name, data=data, schema=target_schema)
-                        logger.success(f"Ingestão '{model_name}' finalizada: {len(data)} registros ({(time.time() - start_model):.3f}s).")
-                    else:
-                        logger.info(f"Ingestão '{model_name}' sem novos dados.")
+                        
+                    status = "success"
                     success_count += 1
-                except Exception as e:
-                    logger.error(f"Erro na Ingestão {model_name}: {e}")
-                    return False
+                    
+            except Exception as e:
+                logger.error(f"Erro no modelo {model_name}: {e}")
+                status = "error"
+                error_msg = str(e)
+                
+                # Salva resultados parciais antes de abortar
+                execution_time = round(time.time() - start_model, 3)
+                run_results_log.append({
+                    "model": model_name, "status": status, 
+                    "execution_time": execution_time, "error": error_msg
+                })
+                self.artifact_manager.save_run_results(command_name, run_results_log)
+                return False
 
+            # Registra sucesso do modelo atual
+            execution_time = round(time.time() - start_model, 3)
+            logger.success(f"'{model_name}' pronto ({execution_time}s).")
+            run_results_log.append({
+                "model": model_name, 
+                "status": status, 
+                "execution_time": execution_time,
+                "rows": rows_affected
+            })
+
+        # 2. Salva o Run Results final
+        self.artifact_manager.save_run_results(command_name, run_results_log)
         return True if success_count > 0 else "no_work"
 
     def ingest(self):
-        """Comando: dfg ingest"""
-        logger.info("Iniciando fase isolada de INGESTÃO (Modelos Python)...")
-        return self._execute_dag(filter_type="python")
+        logger.info("Iniciando fase isolada de INGESTÃO...")
+        return self._execute_dag(filter_type="python", command_name="ingest")
 
     def transform(self):
-        """Comando: dfg transform"""
-        logger.info("Iniciando fase isolada de TRANSFORMAÇÃO (Modelos SQL)...")
-        return self._execute_dag(filter_type="sql")
+        logger.info("Iniciando fase isolada de TRANSFORMAÇÃO...")
+        return self._execute_dag(filter_type="sql", command_name="transform")
 
     def run(self):
-        """Comando: dfg run (Orquestração Completa)"""
         start_run = time.time()
         logger.info(f"Iniciando Pipeline Completo no ambiente: {self.config['project']['target'].upper()}")
         
-        if not self.ingest():
-            return False
-            
-        if not self.transform():
-            return False
-            
-        logger.success(f"--- Forja finalizada em {(time.time() - start_run):.3f}s! ---")
-        return True
+        # Executa tudo em um único DAG unificado para correta geração de artefatos
+        result = self._execute_dag(filter_type=None, command_name="run")
+        
+        if result is True:
+            logger.success(f"--- Forja finalizada em {(time.time() - start_run):.3f}s! ---")
+        return result
 
     def test(self):
         """Executa os contratos de dados"""
@@ -210,17 +237,15 @@ class DFGEngine:
         erros = 0
         
         for model_name, model_info in self.models_registry.items():
-            # Tenta pegar contrato do módulo Python associado
             module = sys.modules.get(model_name)
             contract = getattr(module, 'CONTRACT', None) if module else None
             
             if not contract:
-                logger.warn(f"Modelo '{model_name}': Sem contrato definido. Pulando.")
+                logger.warn(f"Modelo '{model_name}': Sem contrato. Pulando.")
                 continue
                 
             logger.forge(f"Testando '{model_name}'...")
             try:
-                # Validação básica de existência
                 res = adapter.execute(f"SELECT COUNT(*) FROM {model_name}")
                 if not res or res[0][0] == 0: logger.warn(f"  [AVISO] '{model_name}' está vazia.")
                 
@@ -234,7 +259,7 @@ class DFGEngine:
                         elif teste == "unique":
                             dups = adapter.execute(f"SELECT COUNT(*) FROM (SELECT {coluna} FROM {model_name} GROUP BY {coluna} HAVING COUNT(*) > 1) AS s")[0][0]
                             if dups > 0:
-                                logger.error(f"  [FALHA] {model_name}.{coluna}: Duplicatas detectadas!")
+                                logger.error(f"  [FALHA] {model_name}.{coluna}: Duplicatas!")
                                 erros += 1
             except Exception as e:
                 logger.error(f" Erro ao testar {model_name}: {e}")
@@ -244,9 +269,13 @@ class DFGEngine:
         logger.success("Todos os contratos validados!")
 
     def compile(self):
-        """Gera SQLs compilados na pasta target/"""
-        logger.info("Compilando modelos (Dry Run)...")
+        """Gera SQLs compilados e o manifest.json"""
+        logger.info("Compilando modelos e gerando manifest.json...")
         self.discover_models()
+        
+        # Garante que o manifest exista para o comando 'docs'
+        self.artifact_manager.save_manifest(self.models_registry, self.dependencies_map)
+        
         compiled_dir = os.path.join(self.project_dir, "target", "compiled")
         os.makedirs(compiled_dir, exist_ok=True)
         
@@ -256,133 +285,3 @@ class DFGEngine:
                 with open(os.path.join(compiled_dir, f"{name}.sql"), "w", encoding="utf-8") as f:
                     f.write(f"-- Materialização: {info['materialized'].upper()}\n{compiled_sql}")
                 logger.success(f"Compilado: {name}.sql")
-
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#
-#

@@ -1,76 +1,97 @@
 # src/dfg/docs.py
-import sys
 import os
-from datetime import datetime
+import json
+import http.server
+import socketserver
+import webbrowser
 from dfg.logging import logger
-from dfg.engine import DFGEngine
 
 def docs_command(args):
-    logger.info("Gerando documentação e linhagem visual...")
-    current_dir = os.getcwd()
-    
-    try:
-        engine = DFGEngine(project_dir=current_dir)
-        engine.discover_models()
-    except Exception as e:
-        logger.error(f"Falha ao carregar o projeto: {e}")
-        sys.exit(1)
+    project_dir = os.getcwd()
+    target_dir = os.path.join(project_dir, "target")
+    manifest_path = os.path.join(target_dir, "manifest.json")
 
-    catalog_path = os.path.join(current_dir, "catalog.md")
-    
-    with open(catalog_path, "w", encoding="utf-8") as f:
-        # Cabeçalho
-        f.write(f"# 🛠️ Catálogo de Dados: {engine.config['project']['name'].upper()}\n\n")
-        f.write(f"> Gerado automaticamente pelo **Data Forge (DFG)** em {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-        
-        # --- SEÇÃO 1: LINHAGEM VISUAL (MERMAID) ---
-        f.write("## 📊 Linhagem Visual (DAG)\n\n")
-        f.write("```mermaid\n")
-        f.write("graph LR\n")
-        f.write("    %% Estilização\n")
-        f.write("    classDef python fill:#3776ab,color:#fff,stroke:#333,stroke-width:2px;\n")
-        f.write("    classDef sql fill:#f29111,color:#fff,stroke:#333,stroke-width:2px;\n")
-        
-        # Desenha as conexões
-        for model_name, deps in engine.dependencies_map.items():
-            model_info = engine.models_registry[model_name]
-            is_sql = isinstance(model_info, dict) and model_info.get("type") == "sql"
-            
-            # Aplica classes de estilo para diferenciar Python de SQL
-            style_class = "sql" if is_sql else "python"
-            f.write(f"    {model_name}(({model_name}))::: {style_class}\n")
-            
-            for dep in deps:
-                f.write(f"    {dep} --> {model_name}\n")
-        
-        f.write("```\n\n")
-        f.write("> 💡 **Dica:** Azul = Ingestão Python | Laranja = Transformação SQL\n\n")
+    if not os.path.exists(manifest_path):
+        logger.error("Arquivo manifest.json não encontrado. Rode 'dfg compile' ou 'dfg run' primeiro.")
+        return
 
-        # --- SEÇÃO 2: DETALHES DOS MODELOS ---
-        f.write("## 🗄️ Dicionário de Modelos\n\n")
+    # Lê a topologia do projeto
+    with open(manifest_path, "r", encoding="utf-8") as f:
+        manifest = json.load(f)
+
+    # Prepara os dados para o Vis.js
+    nodes = []
+    edges = []
+    
+    for model_name, info in manifest["nodes"].items():
+        # Cores diferentes: Python (Ingestão) = Azul, SQL (Transformação) = Verde
+        color = "#3b82f6" if info["type"] == "python" else "#10b981"
+        shape = "hexagon" if info["type"] == "python" else "database"
         
-        for model_name, deps in engine.dependencies_map.items():
-            model_info = engine.models_registry[model_name]
-            is_sql = isinstance(model_info, dict) and model_info.get("type") == "sql"
-            tipo = "SQL (Transformação)" if is_sql else "Python (Extração/API)"
-            
-            f.write(f"### 🔹 `{model_name}`\n")
-            f.write(f"- **Tipo:** {tipo}\n")
-            
-            if deps:
-                f.write(f"- **Dependências:** {', '.join([f'`{d}`' for d in deps])}\n")
-            
-            # Adiciona os Data Contracts se for Python
-            if not is_sql:
-                module = sys.modules.get(model_name)
-                contract = getattr(module, 'CONTRACT', None)
-                if contract:
-                    f.write("\n**Contratos de Validação:**\n")
-                    f.write("| Coluna | Testes Aplicados |\n")
-                    f.write("| :--- | :--- |\n")
-                    for col, tests in contract.items():
-                        f.write(f"| `{col}` | {', '.join(tests)} |\n")
-            
-            f.write("\n---\n\n")
-            
-    logger.success(f"Catálogo forjado com sucesso: {catalog_path}")
+        nodes.append({
+            "id": model_name,
+            "label": model_name,
+            "color": color,
+            "shape": shape,
+            "title": f"Tipo: {info['type'].upper()}<br>Materialização: {info['materialized']}"
+        })
+
+        for dep in info["depends_on"]:
+            edges.append({"from": dep, "to": model_name, "arrows": "to"})
+
+    # Template HTML embutido (Dark Mode elegante)
+    html_content = f"""
+    <!DOCTYPE html>
+    <html lang="pt-BR">
+    <head>
+        <meta charset="UTF-8">
+        <title>Data Forge - Linhagem de Dados</title>
+        <script type="text/javascript" src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
+        <style>
+            body {{ background-color: #0f172a; color: #f8fafc; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; padding: 0; }}
+            #header {{ padding: 20px; background-color: #1e293b; border-bottom: 1px solid #334155; }}
+            #mynetwork {{ width: 100vw; height: calc(100vh - 80px); }}
+        </style>
+    </head>
+    <body>
+        <div id="header">
+            <h2>🔥 Data Forge - Grafo de Linhagem (DAG)</h2>
+        </div>
+        <div id="mynetwork"></div>
+        <script type="text/javascript">
+            var nodes = new vis.DataSet({json.dumps(nodes)});
+            var edges = new vis.DataSet({json.dumps(edges)});
+            var container = document.getElementById('mynetwork');
+            var data = {{ nodes: nodes, edges: edges }};
+            var options = {{
+                layout: {{ hierarchical: {{ direction: "LR", sortMethod: "directed" }} }},
+                physics: {{ enabled: false }},
+                nodes: {{ font: {{ color: '#ffffff' }} }}
+            }};
+            var network = new vis.Network(container, data, options);
+        </script>
+    </body>
+    </html>
+    """
+
+    # Salva o index.html na pasta target
+    html_path = os.path.join(target_dir, "index.html")
+    with open(html_path, "w", encoding="utf-8") as f:
+        f.write(html_content)
+
+    logger.success("Grafo gerado com sucesso!")
+
+    # Se a pessoa passou o comando `serve`, subimos o servidor
+    if getattr(args, 'serve', False):
+        PORT = 8080
+        os.chdir(target_dir) # Muda o diretório para servir a pasta correta
+        Handler = http.server.SimpleHTTPRequestHandler
+        
+        logger.info(f"Subindo servidor em http://localhost:{PORT}")
+        webbrowser.open(f"http://localhost:{PORT}")
+        
+        try:
+            with socketserver.TCPServer(("", PORT), Handler) as httpd:
+                httpd.serve_forever()
+        except KeyboardInterrupt:
+            logger.info("\nServidor encerrado.")
