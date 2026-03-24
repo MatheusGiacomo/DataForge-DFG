@@ -35,18 +35,14 @@ def test_command(args):
     engine.test()
 
 def log_command(args):
-    """
-    Motor de busca de logs potente.
-    Permite filtrar por ID e comando específico, além de exportar para .txt.
-    """
     from dfg.log_search import LogSearcher
     
-    # Identifica se algum filtro de comando foi acionado
     cmd_filter = None
-    possible_commands = ["run", "ingest", "transform", "test", "compile"]
+    # Adicionamos "docs" na lista de comandos rastreáveis
+    possible_commands = ["run", "ingest", "transform", "test", "compile", "docs"]
     
     for cmd in possible_commands:
-        if getattr(args, cmd):
+        if getattr(args, cmd, False): # Adicionado um default False por segurança
             cmd_filter = cmd
             break
             
@@ -95,6 +91,7 @@ def main():
     cmd_group.add_argument("--transform", action="store_true", help="Filtra apenas registros de 'transform'")
     cmd_group.add_argument("--test", action="store_true", help="Filtra apenas registros de 'test'")
     cmd_group.add_argument("--compile", action="store_true", help="Filtra apenas registros de 'compile'")
+    cmd_group.add_argument("--docs", action="store_true", help="Filtra registros de geração de docs")
     
     log_parser.add_argument("-d", "--dump", action="store_true", help="Exporta a busca para um arquivo .txt (ID.txt)")
 
