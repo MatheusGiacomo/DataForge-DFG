@@ -5,21 +5,24 @@ import os
 import sys
 import re
 import time
-from dfg.dag import DAGResolver
+import threading
+import graphlib
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
+
 from dfg.adapters.factory import AdapterFactory
 from dfg.logging import logger
 from dfg.state import StateManager 
 from dfg.artifacts import ArtifactManager
 
-# Regex para capturar os padrões do dbt
-CONFIG_PATTERN = re.compile(r"\{\{\s*config\(\s*materialized\s*=\s*'([^']+)'\s*\)\s*\}\}")
+# Regex refatorado para capturar múltiplos argumentos no config
+CONFIG_BLOCK_PATTERN = re.compile(r"\{\{\s*config\((.*?)\)\s*\}\}", re.IGNORECASE)
+KWARG_PATTERN = re.compile(r"(\w+)\s*=\s*['\"]([^'\"]+)['\"]")
 REF_PATTERN = re.compile(r"\{\{\s*ref\('([^']+)'\)\s*\}\}")
 
 class DFGEngine:
     def __init__(self, project_dir: str):
         self.project_dir = project_dir
         
-        # Inicializa o logger e o gerenciador de artefatos
         logger.setup(self.project_dir)
         self.artifact_manager = ArtifactManager(self.project_dir)
         
@@ -28,23 +31,20 @@ class DFGEngine:
         self.models_registry = {}
         self.dependencies_map = {}
         self.state_manager = StateManager(self.project_dir)
-        self.adapter = None 
+        
+        # Locks para garantir thread-safety no console e no cache de dados
+        self.print_lock = threading.Lock()
+        self.cache_lock = threading.Lock()
 
     def _load_config(self) -> dict:
         project_toml_path = os.path.join(self.project_dir, "dfg_project.toml")
         profiles_toml_path = os.path.join(self.project_dir, "profiles.toml")
         
         if not os.path.exists(project_toml_path):
-            raise FileNotFoundError("Arquivo dfg_project.toml não encontrado. Rode 'dfg init' primeiro.")
+            raise FileNotFoundError("Arquivo dfg_project.toml não encontrado.")
             
-        if not os.path.exists(profiles_toml_path):
-            raise FileNotFoundError("Arquivo profiles.toml não encontrado na raiz do projeto.")
-
-        with open(project_toml_path, "rb") as f:
-            config = tomllib.load(f)
-            
-        with open(profiles_toml_path, "rb") as f:
-            profiles = tomllib.load(f)
+        with open(project_toml_path, "rb") as f: config = tomllib.load(f)
+        with open(profiles_toml_path, "rb") as f: profiles = tomllib.load(f)
             
         profile_name = config["project"]["profile"]
         target_name = config["project"]["target"]
@@ -55,26 +55,25 @@ class DFGEngine:
         except KeyError:
             raise ValueError(f"Target '{target_name}' não encontrado no profile '{profile_name}'")
             
-        logger.success(f"Configuração carregada. Profile: '{profile_name}', Target: '{target_name}'")
         return config
 
-    def _get_adapter(self):
-        if self.adapter:
-            return self.adapter
-            
+    def _get_thread_safe_adapter(self):
+        """
+        SÊNIOR: Cada thread precisa de sua própria conexão para evitar 
+        colisão de cursores no banco de dados durante execução paralela.
+        """
         target_name = self.config["project"]["target"]
         target_config = self.config["targets"][target_name]
         
-        logger.debug(f"Estabelecendo conexão via driver: '{target_config.get('type')}'...")
-        self.adapter = AdapterFactory.get_adapter(target_config["type"])
-        self.adapter.connect(target_config)
-        return self.adapter
+        adapter = AdapterFactory.get_adapter(target_config["type"])
+        adapter.connect(target_config)
+        return adapter
 
     def discover_models(self):
-        """Escaneia arquivos e popula o registro e mapa de dependências"""
         if self.models_registry: return 
 
-        logger.forge("Escaneando diretório de modelos...")
+        with self.print_lock:
+            logger.forge("Escaneando diretório de modelos e montando DAG...")
         start_time = time.time()
         
         for filename in os.listdir(self.models_dir):
@@ -88,192 +87,256 @@ class DFGEngine:
                 sys.modules[model_name] = module 
                 spec.loader.exec_module(module)
                 
-                self.models_registry[model_name] = {"type": "python", "func": module.model}
+                self.models_registry[model_name] = {"type": "python", "func": module.model, "config": {}}
                 self.dependencies_map[model_name] = getattr(module, 'DEPENDENCIES', [])
 
             elif filename.endswith(".sql"):
                 model_name = filename[:-4]
-                with open(filepath, "r", encoding="utf-8") as f:
-                    raw_sql = f.read()
+                with open(filepath, "r", encoding="utf-8") as f: raw_sql = f.read()
                 
-                config_match = CONFIG_PATTERN.search(raw_sql)
-                materialization = config_match.group(1) if config_match else "table"
-                clean_sql = CONFIG_PATTERN.sub("", raw_sql).strip()
+                # Parse inteligente de configurações (materialized, unique_key, etc)
+                model_config = {"materialized": "table"}
+                config_match = CONFIG_BLOCK_PATTERN.search(raw_sql)
+                if config_match:
+                    kwargs = KWARG_PATTERN.findall(config_match.group(1))
+                    for k, v in kwargs: model_config[k] = v
+
+                clean_sql = CONFIG_BLOCK_PATTERN.sub("", raw_sql).strip()
                 deps = REF_PATTERN.findall(clean_sql)
                 
                 self.models_registry[model_name] = {
                     "type": "sql", 
                     "raw": clean_sql,
-                    "materialized": materialization 
+                    "config": model_config 
                 }
                 self.dependencies_map[model_name] = deps
 
-        logger.success(f"Modelos carregados em {(time.time() - start_time):.3f}s.")
+        with self.print_lock:
+            logger.success(f"Topologia carregada em {(time.time() - start_time):.3f}s.")
+
+    def _execute_node(self, model_name, filter_type, context_cache):
+        """Executa um modelo individualmente de forma isolada (Worker)"""
+        model_info = self.models_registry[model_name]
+        
+        if filter_type and model_info["type"] != filter_type:
+            return {"model": model_name, "status": "skipped", "execution_time": 0}
+
+        start_model = time.time()
+        adapter = self._get_thread_safe_adapter()
+        rows_affected = 0
+        
+        try:
+            # --- EXECUÇÃO SQL ---
+            if model_info["type"] == "sql":
+                mat_type = model_info["config"].get("materialized", "table").upper()
+                unique_key = model_info["config"].get("unique_key")
+                compiled_sql = re.sub(REF_PATTERN, r"\1", model_info["raw"])
+                
+                if mat_type == "INCREMENTAL":
+                    with self.print_lock: logger.forge(f"Processando [INCREMENTAL] '{model_name}'...")
+                    
+                    # Estratégia Idempotente: Tabela Temporária -> Merge/Delete -> Insert
+                    tmp_table = f"{model_name}__dfg_tmp"
+                    adapter.execute(f"DROP TABLE IF EXISTS {tmp_table} CASCADE;")
+                    adapter.execute(f"CREATE TABLE {tmp_table} AS \n{compiled_sql}")
+                    
+                    try:
+                        adapter.execute(f"SELECT 1 FROM {model_name} LIMIT 1")
+                        table_exists = True
+                    except Exception:
+                        table_exists = False
+                        
+                    if not table_exists:
+                        adapter.execute(f"CREATE TABLE {model_name} AS SELECT * FROM {tmp_table}")
+                    else:
+                        if unique_key:
+                            adapter.execute(f"DELETE FROM {model_name} WHERE {unique_key} IN (SELECT {unique_key} FROM {tmp_table})")
+                        adapter.execute(f"INSERT INTO {model_name} SELECT * FROM {tmp_table}")
+                        
+                    adapter.execute(f"DROP TABLE IF EXISTS {tmp_table} CASCADE;")
+                    
+                else:
+                    with self.print_lock: logger.forge(f"Materializando [{mat_type}] '{model_name}'...")
+                    adapter.execute(f"DROP VIEW IF EXISTS {model_name} CASCADE;")
+                    adapter.execute(f"DROP TABLE IF EXISTS {model_name} CASCADE;")
+                    adapter.execute(f"CREATE {mat_type} {model_name} AS \n{compiled_sql}")
+                    
+            # --- EXECUÇÃO PYTHON ---
+            else:
+                with self.print_lock: logger.forge(f"Extraindo/Ingerindo [PYTHON] '{model_name}'...")
+                
+                context = {
+                    "config": self.config,
+                    "ref": lambda name: context_cache.get(name),
+                    "state": self.state_manager.get(model_name),
+                    "set_state": lambda val, m=model_name: self.state_manager.set(m, val)
+                }
+                
+                data = model_info["func"](context)
+                
+                with self.cache_lock:
+                    context_cache[model_name] = data
+                
+                if data:
+                    rows_affected = len(data)
+                    target_schema = self.config["targets"][self.config["project"]["target"]].get("schema", "public")
+                    adapter.load_data(table_name=model_name, data=data, schema=target_schema)
+
+            execution_time = round(time.time() - start_model, 3)
+            with self.print_lock: logger.success(f"✓ '{model_name}' concluído ({execution_time}s).")
+            
+            # Fecha a conexão limpa
+            if hasattr(adapter, 'close'): adapter.close()
+            
+            return {"model": model_name, "status": "success", "execution_time": execution_time, "rows": rows_affected}
+            
+        except Exception as e:
+            with self.print_lock: logger.error(f"✗ Erro crítico em '{model_name}': {e}")
+            if hasattr(adapter, 'close'): adapter.close()
+            return {"model": model_name, "status": "error", "execution_time": round(time.time() - start_model, 3), "error": str(e)}
 
     def _execute_dag(self, filter_type=None, command_name="run"):
-        """
-        Lógica central de execução com coleta de metadados para artefatos.
-        """
         self.discover_models()
-        
-        # 1. Gera o Manifest (Planta do Projeto) antes de começar a execução
         self.artifact_manager.save_manifest(self.models_registry, self.dependencies_map)
         
-        adapter = self._get_adapter()
-        resolver = DAGResolver(self.dependencies_map)
-        execution_order = resolver.get_execution_order()
+        # Lê a quantidade de threads do toml, padrão é 4
+        max_workers = self.config.get("project", {}).get("threads", 4)
         
-        results_cache = {}
+        # Gerenciador de Grafo Nativo do Python
+        ts = graphlib.TopologicalSorter(self.dependencies_map)
+        ts.prepare()
+        
+        run_results_log = []
+        context_cache = {}
+        has_errors = False
         success_count = 0
-        run_results_log = [] # Lista de dicionários para o run_results.json
 
-        for model_name in execution_order:
-            model_info = self.models_registry.get(model_name)
-            if not model_info: continue
-            
-            # Filtro de tipo (ingest vs transform)
-            if filter_type and model_info["type"] != filter_type:
-                run_results_log.append({
-                    "model": model_name, 
-                    "status": "skipped", 
-                    "execution_time": 0
-                })
-                continue
+        with self.print_lock:
+            logger.info(f"Iniciando pool de execução ({max_workers} threads alocadas).")
 
-            start_model = time.time()
-            status = "error"
-            error_msg = None
-            rows_affected = 0
+        # Orquestrador Paralelo
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures_map = {}
             
-            try:
-                # --- EXECUÇÃO SQL ---
-                if model_info["type"] == "sql":
-                    mat_type = model_info["materialized"].upper()
-                    compiled_sql = re.sub(REF_PATTERN, r"\1", model_info["raw"])
-                    
-                    logger.forge(f"Materializando SQL '{model_name}' ({mat_type})...")
-                    drop_queries = [f"DROP VIEW IF EXISTS {model_name} CASCADE;", f"DROP TABLE IF EXISTS {model_name} CASCADE;"]
-                    create_query = f"CREATE {mat_type} {model_name} AS \n{compiled_sql}"
-                    
-                    for drop in drop_queries: adapter.execute(drop)
-                    adapter.execute(create_query)
-                    
-                    status = "success"
-                    success_count += 1
-                        
-                # --- EXECUÇÃO PYTHON ---
-                else:
-                    logger.forge(f"Executando Ingestão Python '{model_name}'...")
-                    context = {
-                        "config": self.config,
-                        "ref": lambda name: results_cache.get(name),
-                        "state": self.state_manager.get(model_name),
-                        "set_state": lambda val, m=model_name: self.state_manager.set(m, val)
-                    }
-                    
-                    data = model_info["func"](context)
-                    results_cache[model_name] = data
-                    
-                    if data:
-                        rows_affected = len(data)
-                        target_schema = self.config["targets"][self.config["project"]["target"]].get("schema", "public")
-                        adapter.load_data(table_name=model_name, data=data, schema=target_schema)
-                        
-                    status = "success"
-                    success_count += 1
-                    
-            except Exception as e:
-                logger.error(f"Erro no modelo {model_name}: {e}")
-                status = "error"
-                error_msg = str(e)
+            while ts.is_active():
+                ready_nodes = ts.get_ready()
                 
-                # Salva resultados parciais antes de abortar
-                execution_time = round(time.time() - start_model, 3)
-                run_results_log.append({
-                    "model": model_name, "status": status, 
-                    "execution_time": execution_time, "error": error_msg
-                })
-                self.artifact_manager.save_run_results(command_name, run_results_log)
-                return False
+                for node in ready_nodes:
+                    fut = executor.submit(self._execute_node, node, filter_type, context_cache)
+                    futures_map[fut] = node
+                    
+                if not futures_map:
+                    break # Impasse ou conclusão
+                    
+                # Espera a primeira thread terminar para liberar seus dependentes
+                done, _ = wait(futures_map.keys(), return_when=FIRST_COMPLETED)
+                
+                for fut in done:
+                    node = futures_map.pop(fut)
+                    try:
+                        result = fut.result()
+                        run_results_log.append(result)
+                        
+                        if result["status"] in ["success", "skipped"]:
+                            if result["status"] == "success": success_count += 1
+                            ts.done(node) # Libera os nós filhos no DAG
+                        else:
+                            has_errors = True
+                            # Se falhou, NÃO chamamos ts.done(node). 
+                            # Isso bloqueia inteligentemente qualquer modelo dependente.
+                    except Exception as e:
+                        has_errors = True
+                        with self.print_lock: logger.error(f"Erro na thread do modelo {node}: {e}")
 
-            # Registra sucesso do modelo atual
-            execution_time = round(time.time() - start_model, 3)
-            logger.success(f"'{model_name}' pronto ({execution_time}s).")
-            run_results_log.append({
-                "model": model_name, 
-                "status": status, 
-                "execution_time": execution_time,
-                "rows": rows_affected
-            })
-
-        # 2. Salva o Run Results final
         self.artifact_manager.save_run_results(command_name, run_results_log)
+        if has_errors: return False
         return True if success_count > 0 else "no_work"
 
-    def ingest(self):
-        logger.info("Iniciando fase isolada de INGESTÃO...")
-        return self._execute_dag(filter_type="python", command_name="ingest")
-
-    def transform(self):
-        logger.info("Iniciando fase isolada de TRANSFORMAÇÃO...")
-        return self._execute_dag(filter_type="sql", command_name="transform")
+    def ingest(self): return self._execute_dag(filter_type="python", command_name="ingest")
+    def transform(self): return self._execute_dag(filter_type="sql", command_name="transform")
 
     def run(self):
         start_run = time.time()
-        logger.info(f"Iniciando Pipeline Completo no ambiente: {self.config['project']['target'].upper()}")
+        with self.print_lock: logger.info(f"Iniciando Pipeline no ambiente: {self.config['project']['target'].upper()}")
         
-        # Executa tudo em um único DAG unificado para correta geração de artefatos
         result = self._execute_dag(filter_type=None, command_name="run")
         
         if result is True:
-            logger.success(f"--- Forja finalizada em {(time.time() - start_run):.3f}s! ---")
+            with self.print_lock: logger.success(f"--- Forja finalizada com sucesso em {(time.time() - start_run):.3f}s! ---")
         return result
+
+    # ... (métodos test e compile permanecem idênticos, apenas garanta que chamam self.discover_models() e usam self._get_thread_safe_adapter() se mexerem no banco)
 
     def test(self):
         """Executa os contratos de dados"""
-        adapter = self._get_adapter()
+        from dfg.logging import logger
+        import sys
+        
+        # AJUSTE 1: Usar a conexão thread-safe e garantir que ela feche
+        adapter = self._get_thread_safe_adapter()
         self.discover_models()
         logger.info("\n--- Iniciando Validação de Contratos ---")
         erros = 0
         
-        for model_name, model_info in self.models_registry.items():
-            module = sys.modules.get(model_name)
-            contract = getattr(module, 'CONTRACT', None) if module else None
-            
-            if not contract:
-                logger.warn(f"Modelo '{model_name}': Sem contrato. Pulando.")
-                continue
+        try:
+            for model_name, model_info in self.models_registry.items():
+                contract = None
                 
-            logger.forge(f"Testando '{model_name}'...")
-            try:
-                res = adapter.execute(f"SELECT COUNT(*) FROM {model_name}")
-                if not res or res[0][0] == 0: logger.warn(f"  [AVISO] '{model_name}' está vazia.")
+                # AJUSTE 2: Lógica dividida para suportar Python e preparar terreno para SQL
+                if model_info["type"] == "python":
+                    module = sys.modules.get(model_name)
+                    contract = getattr(module, 'CONTRACT', None) if module else None
+                elif model_info["type"] == "sql":
+                    # Por enquanto, pegamos do config se existir (ex: {{ config(contract={'id': ['not_null']}) }})
+                    # O ideal no futuro é ler de um arquivo .yml padrão do mercado
+                    contract = model_info.get("config", {}).get("contract", None)
                 
-                for coluna, testes in contract.items():
-                    for teste in testes:
-                        if teste == "not_null":
-                            nulos = adapter.execute(f"SELECT COUNT(*) FROM {model_name} WHERE {coluna} IS NULL")[0][0]
-                            if nulos > 0:
-                                logger.error(f"  [FALHA] {model_name}.{coluna}: {nulos} nulos!")
-                                erros += 1
-                        elif teste == "unique":
-                            dups = adapter.execute(f"SELECT COUNT(*) FROM (SELECT {coluna} FROM {model_name} GROUP BY {coluna} HAVING COUNT(*) > 1) AS s")[0][0]
-                            if dups > 0:
-                                logger.error(f"  [FALHA] {model_name}.{coluna}: Duplicatas!")
-                                erros += 1
-            except Exception as e:
-                logger.error(f" Erro ao testar {model_name}: {e}")
-                erros += 1
+                if not contract:
+                    logger.warn(f"Modelo '{model_name}': Sem contrato definido. Pulando.")
+                    continue
+                    
+                logger.forge(f"Testando '{model_name}'...")
+                try:
+                    res = adapter.execute(f"SELECT COUNT(*) FROM {model_name}")
+                    if not res or res[0][0] == 0: 
+                        logger.warn(f"  [AVISO] Tabela '{model_name}' está vazia.")
+                    
+                    for coluna, testes in contract.items():
+                        for teste in testes:
+                            if teste == "not_null":
+                                nulos = adapter.execute(f"SELECT COUNT(*) FROM {model_name} WHERE {coluna} IS NULL")[0][0]
+                                if nulos > 0:
+                                    logger.error(f"  [FALHA] {model_name}.{coluna}: {nulos} registros nulos!")
+                                    erros += 1
+                            elif teste == "unique":
+                                dups = adapter.execute(f"SELECT COUNT(*) FROM (SELECT {coluna} FROM {model_name} GROUP BY {coluna} HAVING COUNT(*) > 1) AS s")[0][0]
+                                if dups > 0:
+                                    logger.error(f"  [FALHA] {model_name}.{coluna}: Possui duplicatas!")
+                                    erros += 1
+                except Exception as e:
+                    logger.error(f" Erro ao executar teste no banco para {model_name}: {e}")
+                    erros += 1
 
-        if erros > 0: sys.exit(1)
-        logger.success("Todos os contratos validados!")
+        finally:
+            # AJUSTE 3: Higiene de recursos
+            if hasattr(adapter, 'close'):
+                adapter.close()
+
+        if erros > 0: 
+            logger.error(f"Falha na validação: {erros} erro(s) encontrados.")
+            sys.exit(1)
+            
+        logger.success("Todos os contratos validados com sucesso!")
 
     def compile(self):
         """Gera SQLs compilados e o manifest.json"""
+        from dfg.logging import logger
+        import os
+        import re
+        
         logger.info("Compilando modelos e gerando manifest.json...")
         self.discover_models()
         
-        # Garante que o manifest exista para o comando 'docs'
         self.artifact_manager.save_manifest(self.models_registry, self.dependencies_map)
         
         compiled_dir = os.path.join(self.project_dir, "target", "compiled")
@@ -281,7 +344,13 @@ class DFGEngine:
         
         for name, info in self.models_registry.items():
             if info["type"] == "sql":
-                compiled_sql = re.sub(REF_PATTERN, r"\1", info["raw"])
+                # AJUSTE SÊNIOR: Acessando a chave de forma segura através do dicionário de config
+                mat_type = info.get("config", {}).get("materialized", "table").upper()
+                
+                # Aproveitamos para compilar usando a REF_PATTERN que já definimos no topo do engine.py
+                # (Certifique-se de que REF_PATTERN está importada ou acessível aqui)
+                compiled_sql = re.sub(r"\{\{\s*ref\('([^']+)'\)\s*\}\}", r"\1", info["raw"])
+                
                 with open(os.path.join(compiled_dir, f"{name}.sql"), "w", encoding="utf-8") as f:
-                    f.write(f"-- Materialização: {info['materialized'].upper()}\n{compiled_sql}")
+                    f.write(f"-- Materialização: {mat_type}\n{compiled_sql}")
                 logger.success(f"Compilado: {name}.sql")
