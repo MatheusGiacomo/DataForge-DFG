@@ -4,6 +4,7 @@ import importlib.util
 import os
 import sys
 import re
+import yaml
 import time
 import threading
 import graphlib
@@ -70,32 +71,46 @@ class DFGEngine:
         return adapter
 
     def discover_models(self):
+        """
+        SÊNIOR: Descoberta em duas fases.
+        Fase 1: Mapeia arquivos de execução (.sql, .py).
+        Fase 2: Enriquece com metadados e contratos (.yml).
+        """
         if self.models_registry: return 
 
         with self.print_lock:
-            logger.forge("Escaneando diretório de modelos e montando DAG...")
-        start_time = time.time()
+            logger.forge("Escaneando modelos e metadados...")
         
+        # --- FASE 1: Identificação de Executáveis (.py e .sql) ---
         for filename in os.listdir(self.models_dir):
             if filename == "__init__.py": continue
             filepath = os.path.join(self.models_dir, filename)
             
+            # Caso 1: Modelos em Python (Ingestão)
             if filename.endswith(".py"):
                 model_name = filename[:-3]
+                
+                # Lógica de Importação Dinâmica
                 spec = importlib.util.spec_from_file_location(model_name, filepath)
                 module = importlib.util.module_from_spec(spec)
                 sys.modules[model_name] = module 
                 spec.loader.exec_module(module)
                 
-                self.models_registry[model_name] = {"type": "python", "func": module.model, "config": {}}
+                # Registra o modelo e tenta pegar o contrato definido no código (fallback)
+                self.models_registry[model_name] = {
+                    "type": "python", 
+                    "func": module.model, 
+                    "config": {"contract": getattr(module, 'CONTRACT', {})} 
+                }
                 self.dependencies_map[model_name] = getattr(module, 'DEPENDENCIES', [])
 
+            # Caso 2: Modelos em SQL (Transformação)
             elif filename.endswith(".sql"):
                 model_name = filename[:-4]
                 with open(filepath, "r", encoding="utf-8") as f: raw_sql = f.read()
                 
-                # Parse inteligente de configurações (materialized, unique_key, etc)
-                model_config = {"materialized": "table"}
+                # Extração de Configuração Interna {{ config(...) }}
+                model_config = {"materialized": "table", "contract": {}}
                 config_match = CONFIG_BLOCK_PATTERN.search(raw_sql)
                 if config_match:
                     kwargs = KWARG_PATTERN.findall(config_match.group(1))
@@ -111,8 +126,40 @@ class DFGEngine:
                 }
                 self.dependencies_map[model_name] = deps
 
+        # --- FASE 2: Enriquecimento via YAML (Metadados e Testes) ---
+        for filename in os.listdir(self.models_dir):
+            if filename.endswith((".yml", ".yaml")):
+                yaml_path = os.path.join(self.models_dir, filename)
+                with open(yaml_path, "r", encoding="utf-8") as f:
+                    try:
+                        metadata = yaml.safe_load(f)
+                        if not metadata or "models" not in metadata: continue
+                        
+                        for m_meta in metadata["models"]:
+                            name = m_meta.get("name")
+                            if name in self.models_registry:
+                                # Injeta descrição para o comando 'docs'
+                                self.models_registry[name]["config"]["description"] = m_meta.get("description", "")
+                                
+                                # Converte o formato do YAML para o dicionário de testes do Engine
+                                if "columns" in m_meta:
+                                    contract = {}
+                                    for col in m_meta["columns"]:
+                                        col_name = col.get("name")
+                                        if "tests" in col:
+                                            contract[col_name] = col["tests"]
+                                    
+                                    # O YAML tem precedência sobre o contrato definido no .sql ou .py
+                                    self.models_registry[name]["config"]["contract"] = contract
+                                    
+                        with self.print_lock:
+                            logger.success(f"Metadados carregados de: {filename}")
+                    except Exception as e:
+                        with self.print_lock:
+                            logger.error(f"Erro ao processar arquivo YAML {filename}: {e}")
+
         with self.print_lock:
-            logger.success(f"Topologia carregada em {(time.time() - start_time):.3f}s.")
+            logger.info(f"DAG carregado: {len(self.models_registry)} modelos identificados.")
 
     def _execute_node(self, model_name, filter_type, context_cache):
         """Executa um modelo individualmente de forma isolada (Worker)"""
