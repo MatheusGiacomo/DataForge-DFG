@@ -34,6 +34,28 @@ def test_command(args):
     engine = DFGEngine(project_dir=os.getcwd())
     engine.test()
 
+def seed_command(args):
+    """Handler para o comando de carga de dados estáticos."""
+    from dfg.engine import DFGEngine
+    from dfg.seed import SeedRunner  # Importamos nossa nova classe
+    from dfg.logging import logger
+    import os
+    import sys
+    
+    logger.info("Disparando rotina de carga de sementes (Seeds)...")
+    
+    try:
+        # Inicializa o motor apenas para carregar configs e gerenciar o adapter
+        engine = DFGEngine(os.getcwd())
+        
+        # Passa o motor para o Runner especializado e executa
+        runner = SeedRunner(engine)
+        runner.run()
+        
+    except Exception as e:
+        logger.error(f"Erro ao executar seeds: {e}")
+        sys.exit(1)
+
 def log_command(args):
     from dfg.log_search import LogSearcher
     
@@ -60,7 +82,8 @@ COMMANDS = {
     "debug": debug_command,
     "docs": docs_command,    # O handler em docs.py agora trata a flag --serve
     "compile": compile_command,
-    "log": log_command 
+    "log": log_command,
+    "seed": seed_command
 }
 
 def main():
@@ -76,6 +99,7 @@ def main():
     subparsers.add_parser("test", help="Testa a integridade dos modelos")
     subparsers.add_parser("debug", help="Verifica as configurações e conexão")
     subparsers.add_parser("compile", help="Gera os arquivos SQL finais e o manifest.json (Dry Run)")
+    subparsers.add_parser("seed", help="Ingestão de metadados estáticos (CSV)")
     
     # Documentação e Grafo Visual
     docs_parser = subparsers.add_parser("docs", help="Gera a documentação e o grafo de linhagem (DAG)")

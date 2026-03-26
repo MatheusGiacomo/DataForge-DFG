@@ -224,3 +224,105 @@ Interface de Seleção Numerada: Uma lista dinâmica é gerada. Se o usuário po
 Injeção de Boilerplate: Após a escolha, o sistema não gera um arquivo genérico. Ele utiliza o template de campos específico do banco escolhido (ex: host/port para Postgres vs database path para DuckDB).
 
 Nota de Engenharia: Este mecanismo elimina o erro comum de "Comando não encontrado" ou "Driver ausente" no primeiro uso da ferramenta, garantindo uma experiência de usuário (UX) fluida desde o primeiro minuto.
+
+
+
+
+
+🌱 Módulo de Seeds (Carga de Dados Estáticos)
+O comando dfg seed é responsável por popular o Data Warehouse com tabelas de referência, mapeamentos e dados de domínio que residem no repositório de código em formato .csv.
+
+1. Arquitetura e Fluxo de Dados
+Diferente da execução de modelos SQL, o SeedRunner opera diretamente sobre o sistema de arquivos, realizando o seguinte ciclo de vida:
+
+Identificação: Localiza todos os arquivos .csv dentro do diretório /seeds.
+
+Inferência de Tipo (Type Discovery): Analisa os valores para converter strings em INT ou FLOAT antes da carga, garantindo que o banco de dados receba tipos primitivos corretos em vez de apenas texto.
+
+Normalização de Encoding: Utiliza o padrão utf-8-sig para remover automaticamente o caractere BOM (Byte Order Mark), comum em arquivos exportados via Microsoft Excel.
+
+Materialização Idempotente: Executa um padrão DROP TABLE IF EXISTS ... CASCADE seguido de um CREATE, garantindo que a versão no banco seja sempre a "fonte da verdade" idêntica ao arquivo local.
+
+2. Estrutura de Diretórios
+Para que o motor reconheça as sementes, os arquivos devem seguir a estrutura abaixo:
+meu_projeto/
+├── dfg_project.toml
+├── profiles.toml
+├── models/
+└── seeds/
+    ├── categorias.csv     # Criará a tabela 'categorias'
+    └── de_para_moedas.csv # Criará a tabela 'de_para_moedas'
+
+
+
+
+🔧 Especificações Técnicas
+Comportamento do SeedRunner
+Característica,      Detalhe Técnico
+Atomicidade,         Cada arquivo é processado em uma transação isolada.
+Limpeza de Dados,    Espaços em branco (whitespace) são removidos automaticamente de strings.
+Higiene de Conexão,  Utiliza o thread_safe_adapter do motor principal para evitar vazamento de memória ou colisões de cursor.
+Schema Target,       Os dados são injetados no schema definido no perfil ativo (ex: public ou dev).
+
+Exemplo de Inferência Automática
+Se o seu CSV contém:
+id,valor,ativo
+1,25.50,sim
+
+O Gemini disse
+Esta documentação detalha o módulo de Seeds da NexusData, projetado para transformar arquivos estáticos (CSV) em tabelas relacionais de forma automatizada e resiliente.
+
+🌱 Módulo de Seeds (Carga de Dados Estáticos)
+O comando dfg seed é responsável por popular o Data Warehouse com tabelas de referência, mapeamentos e dados de domínio que residem no repositório de código em formato .csv.
+
+1. Arquitetura e Fluxo de Dados
+Diferente da execução de modelos SQL, o SeedRunner opera diretamente sobre o sistema de arquivos, realizando o seguinte ciclo de vida:
+
+Identificação: Localiza todos os arquivos .csv dentro do diretório /seeds.
+
+Inferência de Tipo (Type Discovery): Analisa os valores para converter strings em INT ou FLOAT antes da carga, garantindo que o banco de dados receba tipos primitivos corretos em vez de apenas texto.
+
+Normalização de Encoding: Utiliza o padrão utf-8-sig para remover automaticamente o caractere BOM (Byte Order Mark), comum em arquivos exportados via Microsoft Excel.
+
+Materialização Idempotente: Executa um padrão DROP TABLE IF EXISTS ... CASCADE seguido de um CREATE, garantindo que a versão no banco seja sempre a "fonte da verdade" idêntica ao arquivo local.
+
+2. Estrutura de Diretórios
+Para que o motor reconheça as sementes, os arquivos devem seguir a estrutura abaixo:
+
+Plaintext
+meu_projeto/
+├── dfg_project.toml
+├── profiles.toml
+├── models/
+└── seeds/
+    ├── categorias.csv     # Criará a tabela 'categorias'
+    └── de_para_moedas.csv # Criará a tabela 'de_para_moedas'
+    
+🔧 Especificações Técnicas
+Comportamento do SeedRunner
+Característica	Detalhe Técnico
+Atomicidade	Cada arquivo é processado em uma transação isolada.
+Limpeza de Dados	Espaços em branco (whitespace) são removidos automaticamente de strings.
+Higiene de Conexão	Utiliza o thread_safe_adapter do motor principal para evitar vazamento de memória ou colisões de cursor.
+Schema Target	Os dados são injetados no schema definido no perfil ativo (ex: public ou dev).
+Exemplo de Inferência Automática
+Se o seu CSV contém:
+
+Snippet de código
+id   valor   ativo
+1    25.50    sim
+
+O SeedRunner instruirá o adaptador a criar:
+
+  id: INTEGER
+
+  valor: FLOAT
+
+  ativo: VARCHAR (Mantido como string, pois não é numérico)
+
+🚀 Como Utilizar
+Coloque seus arquivos CSV na pasta seeds/.
+
+Garanta que a primeira linha do CSV contenha os nomes das colunas exatamente como deseja no banco.
+
+Execute o comando: dfg seed
