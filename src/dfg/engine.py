@@ -3,7 +3,6 @@ import tomllib
 import importlib.util
 import os
 import sys
-import re
 import yaml
 import time
 import threading
@@ -14,11 +13,7 @@ from dfg.adapters.factory import AdapterFactory
 from dfg.logging import logger
 from dfg.state import StateManager 
 from dfg.artifacts import ArtifactManager
-
-# Regex refatorado para capturar múltiplos argumentos no config
-CONFIG_BLOCK_PATTERN = re.compile(r"\{\{\s*config\((.*?)\)\s*\}\}", re.IGNORECASE)
-KWARG_PATTERN = re.compile(r"(\w+)\s*=\s*['\"]([^'\"]+)['\"]")
-REF_PATTERN = re.compile(r"\{\{\s*ref\('([^']+)'\)\s*\}\}")
+from dfg.compiler import SQLCompiler  # <-- Nosso novo compilador Jinja
 
 class DFGEngine:
     def __init__(self, project_dir: str):
@@ -73,13 +68,17 @@ class DFGEngine:
     def discover_models(self):
         """
         SÊNIOR: Descoberta em duas fases.
-        Fase 1: Mapeia arquivos de execução (.sql, .py).
+        Fase 1: Mapeia arquivos de execução (.sql, .py) e compila templates Jinja.
         Fase 2: Enriquece com metadados e contratos (.yml).
         """
         if self.models_registry: return 
 
         with self.print_lock:
             logger.forge("Escaneando modelos e metadados...")
+            
+        # Instancia o compilador Jinja com o schema alvo do projeto
+        target_schema = self.config["targets"][self.config["project"]["target"]].get("schema", "public")
+        jinja_compiler = SQLCompiler(target_schema)
         
         # --- FASE 1: Identificação de Executáveis (.py e .sql) ---
         for filename in os.listdir(self.models_dir):
@@ -90,13 +89,11 @@ class DFGEngine:
             if filename.endswith(".py"):
                 model_name = filename[:-3]
                 
-                # Lógica de Importação Dinâmica
                 spec = importlib.util.spec_from_file_location(model_name, filepath)
                 module = importlib.util.module_from_spec(spec)
                 sys.modules[model_name] = module 
                 spec.loader.exec_module(module)
                 
-                # Registra o modelo e tenta pegar o contrato definido no código (fallback)
                 self.models_registry[model_name] = {
                     "type": "python", 
                     "func": module.model, 
@@ -109,22 +106,28 @@ class DFGEngine:
                 model_name = filename[:-4]
                 with open(filepath, "r", encoding="utf-8") as f: raw_sql = f.read()
                 
-                # Extração de Configuração Interna {{ config(...) }}
-                model_config = {"materialized": "table", "contract": {}}
-                config_match = CONFIG_BLOCK_PATTERN.search(raw_sql)
-                if config_match:
-                    kwargs = KWARG_PATTERN.findall(config_match.group(1))
-                    for k, v in kwargs: model_config[k] = v
-
-                clean_sql = CONFIG_BLOCK_PATTERN.sub("", raw_sql).strip()
-                deps = REF_PATTERN.findall(clean_sql)
+                # SÊNIOR: Compilação Jinja substitui a Regex antiga!
+                try:
+                    compilation = jinja_compiler.compile(raw_sql, model_name)
+                except Exception as e:
+                    with self.print_lock:
+                        logger.error(f"Falha na compilação do modelo '{model_name}': {e}")
+                    continue # Pula este modelo em caso de erro de sintaxe
                 
+                # Garante valores padrões no config extraído
+                model_config = compilation["config"]
+                if "materialized" not in model_config:
+                    model_config["materialized"] = "table"
+                if "contract" not in model_config:
+                    model_config["contract"] = {}
+
                 self.models_registry[model_name] = {
                     "type": "sql", 
-                    "raw": clean_sql,
+                    "raw": raw_sql,
+                    "compiled": compilation["sql"], # O SQL pronto para rodar
                     "config": model_config 
                 }
-                self.dependencies_map[model_name] = deps
+                self.dependencies_map[model_name] = compilation["depends_on"]
 
         # --- FASE 2: Enriquecimento via YAML (Metadados e Testes) ---
         for filename in os.listdir(self.models_dir):
@@ -138,10 +141,8 @@ class DFGEngine:
                         for m_meta in metadata["models"]:
                             name = m_meta.get("name")
                             if name in self.models_registry:
-                                # Injeta descrição para o comando 'docs'
                                 self.models_registry[name]["config"]["description"] = m_meta.get("description", "")
                                 
-                                # Converte o formato do YAML para o dicionário de testes do Engine
                                 if "columns" in m_meta:
                                     contract = {}
                                     for col in m_meta["columns"]:
@@ -149,7 +150,6 @@ class DFGEngine:
                                         if "tests" in col:
                                             contract[col_name] = col["tests"]
                                     
-                                    # O YAML tem precedência sobre o contrato definido no .sql ou .py
                                     self.models_registry[name]["config"]["contract"] = contract
                                     
                         with self.print_lock:
@@ -177,12 +177,13 @@ class DFGEngine:
             if model_info["type"] == "sql":
                 mat_type = model_info["config"].get("materialized", "table").upper()
                 unique_key = model_info["config"].get("unique_key")
-                compiled_sql = re.sub(REF_PATTERN, r"\1", model_info["raw"])
+                
+                # Pega o SQL do Jinja, já processado e limpo!
+                compiled_sql = model_info["compiled"]
                 
                 if mat_type == "INCREMENTAL":
                     with self.print_lock: logger.forge(f"Processando [INCREMENTAL] '{model_name}'...")
                     
-                    # Estratégia Idempotente: Tabela Temporária -> Merge/Delete -> Insert
                     tmp_table = f"{model_name}__dfg_tmp"
                     adapter.execute(f"DROP TABLE IF EXISTS {tmp_table} CASCADE;")
                     adapter.execute(f"CREATE TABLE {tmp_table} AS \n{compiled_sql}")
@@ -232,7 +233,6 @@ class DFGEngine:
             execution_time = round(time.time() - start_model, 3)
             with self.print_lock: logger.success(f"✓ '{model_name}' concluído ({execution_time}s).")
             
-            # Fecha a conexão limpa
             if hasattr(adapter, 'close'): adapter.close()
             
             return {"model": model_name, "status": "success", "execution_time": execution_time, "rows": rows_affected}
@@ -246,10 +246,7 @@ class DFGEngine:
         self.discover_models()
         self.artifact_manager.save_manifest(self.models_registry, self.dependencies_map)
         
-        # Lê a quantidade de threads do toml, padrão é 4
         max_workers = self.config.get("project", {}).get("threads", 4)
-        
-        # Gerenciador de Grafo Nativo do Python
         ts = graphlib.TopologicalSorter(self.dependencies_map)
         ts.prepare()
         
@@ -261,7 +258,6 @@ class DFGEngine:
         with self.print_lock:
             logger.info(f"Iniciando pool de execução ({max_workers} threads alocadas).")
 
-        # Orquestrador Paralelo
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures_map = {}
             
@@ -273,9 +269,8 @@ class DFGEngine:
                     futures_map[fut] = node
                     
                 if not futures_map:
-                    break # Impasse ou conclusão
+                    break 
                     
-                # Espera a primeira thread terminar para liberar seus dependentes
                 done, _ = wait(futures_map.keys(), return_when=FIRST_COMPLETED)
                 
                 for fut in done:
@@ -286,11 +281,9 @@ class DFGEngine:
                         
                         if result["status"] in ["success", "skipped"]:
                             if result["status"] == "success": success_count += 1
-                            ts.done(node) # Libera os nós filhos no DAG
+                            ts.done(node) 
                         else:
                             has_errors = True
-                            # Se falhou, NÃO chamamos ts.done(node). 
-                            # Isso bloqueia inteligentemente qualquer modelo dependente.
                     except Exception as e:
                         has_errors = True
                         with self.print_lock: logger.error(f"Erro na thread do modelo {node}: {e}")
@@ -312,14 +305,11 @@ class DFGEngine:
             with self.print_lock: logger.success(f"--- Forja finalizada com sucesso em {(time.time() - start_run):.3f}s! ---")
         return result
 
-    # ... (métodos test e compile permanecem idênticos, apenas garanta que chamam self.discover_models() e usam self._get_thread_safe_adapter() se mexerem no banco)
-
     def test(self):
         """Executa os contratos de dados"""
         from dfg.logging import logger
         import sys
         
-        # AJUSTE 1: Usar a conexão thread-safe e garantir que ela feche
         adapter = self._get_thread_safe_adapter()
         self.discover_models()
         logger.info("\n--- Iniciando Validação de Contratos ---")
@@ -329,13 +319,10 @@ class DFGEngine:
             for model_name, model_info in self.models_registry.items():
                 contract = None
                 
-                # AJUSTE 2: Lógica dividida para suportar Python e preparar terreno para SQL
                 if model_info["type"] == "python":
                     module = sys.modules.get(model_name)
                     contract = getattr(module, 'CONTRACT', None) if module else None
                 elif model_info["type"] == "sql":
-                    # Por enquanto, pegamos do config se existir (ex: {{ config(contract={'id': ['not_null']}) }})
-                    # O ideal no futuro é ler de um arquivo .yml padrão do mercado
                     contract = model_info.get("config", {}).get("contract", None)
                 
                 if not contract:
@@ -365,7 +352,6 @@ class DFGEngine:
                     erros += 1
 
         finally:
-            # AJUSTE 3: Higiene de recursos
             if hasattr(adapter, 'close'):
                 adapter.close()
 
@@ -379,7 +365,6 @@ class DFGEngine:
         """Gera SQLs compilados e o manifest.json"""
         from dfg.logging import logger
         import os
-        import re
         
         logger.info("Compilando modelos e gerando manifest.json...")
         self.discover_models()
@@ -391,12 +376,10 @@ class DFGEngine:
         
         for name, info in self.models_registry.items():
             if info["type"] == "sql":
-                # AJUSTE SÊNIOR: Acessando a chave de forma segura através do dicionário de config
                 mat_type = info.get("config", {}).get("materialized", "table").upper()
                 
-                # Aproveitamos para compilar usando a REF_PATTERN que já definimos no topo do engine.py
-                # (Certifique-se de que REF_PATTERN está importada ou acessível aqui)
-                compiled_sql = re.sub(r"\{\{\s*ref\('([^']+)'\)\s*\}\}", r"\1", info["raw"])
+                # Pegamos o SQL já compilado pelo Jinja na fase de descoberta
+                compiled_sql = info["compiled"]
                 
                 with open(os.path.join(compiled_dir, f"{name}.sql"), "w", encoding="utf-8") as f:
                     f.write(f"-- Materialização: {mat_type}\n{compiled_sql}")

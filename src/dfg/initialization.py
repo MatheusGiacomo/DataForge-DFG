@@ -12,7 +12,6 @@ DB_CATALOG = [
     {"name": "SQL Server (pyodbc)", "lib": "pyodbc", "type": "sqlserver", "fields": 'driver = "ODBC Driver 17 for SQL Server"\nserver = "localhost"\nuser = "sa"\npassword = "password"\ndatabase = "{name}_db"'},
     {"name": "BigQuery", "lib": "google.cloud.bigquery", "type": "bigquery", "fields": 'method = "service-account"\nproject = "seu-projeto-gcp"\ndataset = "{name}_dataset"\nkeyfile = "caminho/para/keyfile.json"'},
     {"name": "Snowflake", "lib": "snowflake.connector", "type": "snowflake", "fields": 'account = "xyz123.region"\nuser = "admin"\npassword = "password"\nwarehouse = "compute_wh"\ndatabase = "{name}_db"\nschema = "public"'},
-    # SQLite sempre vai aparecer, pois é nativo da linguagem Python
     {"name": "SQLite (Nativo)", "lib": "sqlite3", "type": "sqlite", "fields": 'database = "{name}_sqlite.db"'}
 ]
 

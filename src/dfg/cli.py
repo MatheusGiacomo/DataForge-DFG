@@ -6,7 +6,7 @@ from dfg.logging import logger
 from dfg.initialization import init_command
 from dfg.debug import debug_command
 from dfg.docs import docs_command
-from dfg.compile import compile_command
+from dfg.compiler import compile_command
 
 # --- Handlers de Comando ---
 
