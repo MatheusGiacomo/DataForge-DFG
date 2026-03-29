@@ -33,28 +33,16 @@ ANVIL_ASCII = """
 """
 
 def is_lib_installed(lib_name):
-    """
-    Verifica de forma segura se a biblioteca está instalada no venv.
-    Para evitar o erro crítico do Python ao buscar submódulos (com ponto),
-    verificamos estritamente o módulo raiz.
-    """
+    """Verifica de forma segura se a biblioteca está instalada no venv."""
     try:
-        # Pulo do gato: "mysql.connector" vira apenas "mysql".
-        # "google.cloud.bigquery" vira apenas "google".
         base_module = lib_name.split('.')[0] 
-        
-        # Ao buscar nomes sem ponto, o find_spec nunca dá erro, apenas retorna None
         spec = importlib.util.find_spec(base_module)
         return spec is not None
     except Exception:
-        # Fallback de segurança máxima
         return False
 
 def discover_installed_drivers():
-    """
-    Varre o catálogo e retorna um dicionário numerado dinamicamente
-    apenas com os drivers que realmente existem na máquina do usuário.
-    """
+    """Retorna drivers instalados na máquina."""
     available = {}
     index = 1
     for db in DB_CATALOG:
@@ -65,19 +53,17 @@ def discover_installed_drivers():
 
 def init_command(args):
     print(ANVIL_ASCII)
-    logger.success("Bem-vindo à Forja NexusData!")
+    logger.success("Bem-vindo à Forja Data Forge (DFG)!")
     print("-" * 45)
     
-    project_name = input("Nome do seu projeto (ex: nexus_project): ") or "nexus_project"
+    project_name = input("Nome do seu projeto (ex: dfg_project): ") or "dfg_project"
     
-    # --- Lógica Dinâmica de Auto-Discovery ---
     installed_dbs = discover_installed_drivers()
     
     print("\nBancos de dados identificados no seu ambiente:")
     for idx, db in installed_dbs.items():
         print(f"[{idx}] {db['name']}")
     
-    # Loop de segurança: obriga o usuário a digitar uma opção válida
     while True:
         choice = input("\nDigite o número para o banco de preferência: ")
         if choice in installed_dbs:
@@ -88,7 +74,7 @@ def init_command(args):
 
     logger.success(f"Configurando forja para: {selected_db['name']}")
 
-    # 1. Cria o dfg_project.toml (Configuração de Infra)
+    # 1. Cria o dfg_project.toml
     project_toml = f"""[project]
 name = "{project_name}"
 profile = "{project_name}"
@@ -98,7 +84,7 @@ threads = 4
     with open("dfg_project.toml", "w", encoding="utf-8") as f:
         f.write(project_toml)
         
-    # 2. Cria o profiles.toml (Configuração de Credenciais)
+    # 2. Cria o profiles.toml
     conn_fields = selected_db["fields"].format(name=project_name)
     
     profiles_toml = f"""[{project_name}]
@@ -116,17 +102,43 @@ type = "{selected_db['type']}"
     with open("profiles.toml", "w", encoding="utf-8") as f:
         f.write(profiles_toml)
         
-    # 3. Estrutura de Pastas Profissional
-    folders = ["models", "seeds", "analysis", "target/compiled"]
+    # 3. Estrutura de Pastas Profissional (Snapshots inclusa)
+    folders = [
+        "models", 
+        "snapshots",  # Nova pasta para SCD Tipo 2
+        "seeds", 
+        "analysis", 
+        "tests",
+        "target/compiled"
+    ]
     for folder in folders:
         os.makedirs(folder, exist_ok=True)
     
-    # Cria um modelo de exemplo
+    # 4. Boilerplates (Arquivos iniciais para ajudar o usuário)
+    
+    # Exemplo de Modelo
     example_sql = os.path.join("models", "my_first_model.sql")
     if not os.path.exists(example_sql):
         with open(example_sql, "w", encoding="utf-8") as f:
-            f.write("{{ config(materialized='table') }}\n\nSELECT 1 as id, 'Nexus' as platform")
+            f.write("{{ config(materialized='table') }}\n\nSELECT 1 as id, 'Data Forge' as tool")
+
+    # Exemplo de Snapshot (SCD2)
+    example_snapshot = os.path.join("snapshots", "my_first_snapshot.sql")
+    if not os.path.exists(example_snapshot):
+        with open(example_snapshot, "w", encoding="utf-8") as f:
+            f.write("""{% snapshot my_first_snapshot %}
+
+{{
+    config(
+        unique_key='id',
+        strategy='timestamp',
+        updated_at='updated_at'
+    )
+}}
+
+SELECT * FROM {{ ref('my_first_model') }}
+
+{% endsnapshot %}""")
 
     print("-" * 45)
     logger.success(f"Projeto '{project_name}' forjado com sucesso!")
-    logger.info(f"O arquivo 'profiles.toml' foi customizado com os campos exigidos pelo {selected_db['name']}.")

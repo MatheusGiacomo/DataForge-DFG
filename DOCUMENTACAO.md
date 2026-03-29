@@ -326,3 +326,30 @@ Coloque seus arquivos CSV na pasta seeds/.
 Garanta que a primeira linha do CSV contenha os nomes das colunas exatamente como deseja no banco.
 
 Execute o comando: dfg seed
+
+
+
+Arquitetura de Core: Snapshots & Orquestração
+A nova estrutura foi desenhada para suportar SCD Tipo 2 (Slowly Changing Dimensions), permitindo que você rastreie o histórico de alterações em qualquer tabela de origem.
+
+1. Snapshots (SCD Tipo 2)
+Implementamos uma lógica de "dois caminhos" (Initial vs. Merge) que garante performance e integridade:
+Etapa              Ação no Banco de Dados     Objetivo
+Carga Inicial      CREATE TABLE AS ...        "Cria a tabela de histórico com colunas de controle (dfg_valid_from, dfg_is_active, etc)."
+Merge (SCD2)       UPDATE + INSERT            Invalida registros antigos (fecha a janela de tempo) e insere as novas versões dos dados.
+
+2. O Compilador (Jinja + Regex Parsing)
+O SQLCompiler agora possui "visão computacional" sobre os arquivos SQL:
+
+Extração Automática: Através de Expressões Regulares (Regex), o compilador separa o que é configuração (unique_key, updated_at) do que é a query SELECT pura.
+
+Renderização Jinja: Após o parsing, ele limpa as tags customizadas e entrega um SQL compilado pronto para o banco, resolvendo todas as macros e ref().
+
+🏗️ Estrutura do Motor (DFGEngine)
+O __init__ da Engine foi centralizado para servir como o ponto único de verdade do projeto:
+
+Gerenciamento de Pastas: Mapeamento automático de models/, snapshots/ e seeds/.
+
+Instanciação de Runners: O SnapshotRunner e o SQLCompiler agora são membros fixos da Engine, garantindo que todos os comandos (run, compile, snapshot) usem o mesmo motor.
+
+Thread-Safety: Implementação de Locks para evitar conflitos quando você decidir rodar processos em paralelo no futuro.
