@@ -6,7 +6,7 @@ from dfg.logging import logger
 from dfg.initialization import init_command
 from dfg.debug import debug_command
 from dfg.docs import docs_command
-from dfg.compiler import compile_command
+# REMOVIDO: import direto do compiler que causava erro
 
 # --- Handlers de Comando ---
 
@@ -34,10 +34,21 @@ def test_command(args):
     engine = DFGEngine(project_dir=os.getcwd())
     engine.test()
 
+def compile_command(args):
+    """Handler para o comando de compilação (Dry Run)."""
+    from dfg.engine import DFGEngine
+    try:
+        engine = DFGEngine(project_dir=os.getcwd())
+        # Agora o compile é um método do motor, garantindo que use o JinjaCompiler
+        engine.compile()
+    except Exception as e:
+        logger.error(f"Erro ao compilar projeto: {e}")
+        sys.exit(1)
+
 def seed_command(args):
     """Handler para o comando de carga de dados estáticos."""
     from dfg.engine import DFGEngine
-    from dfg.seed import SeedRunner  # Importamos nossa nova classe
+    from dfg.seed import SeedRunner
     from dfg.logging import logger
     import os
     import sys
@@ -45,13 +56,9 @@ def seed_command(args):
     logger.info("Disparando rotina de carga de sementes (Seeds)...")
     
     try:
-        # Inicializa o motor apenas para carregar configs e gerenciar o adapter
         engine = DFGEngine(os.getcwd())
-        
-        # Passa o motor para o Runner especializado e executa
         runner = SeedRunner(engine)
         runner.run()
-        
     except Exception as e:
         logger.error(f"Erro ao executar seeds: {e}")
         sys.exit(1)
@@ -60,11 +67,10 @@ def log_command(args):
     from dfg.log_search import LogSearcher
     
     cmd_filter = None
-    # Adicionamos "docs" na lista de comandos rastreáveis
     possible_commands = ["run", "ingest", "transform", "test", "compile", "docs"]
     
     for cmd in possible_commands:
-        if getattr(args, cmd, False): # Adicionado um default False por segurança
+        if getattr(args, cmd, False): 
             cmd_filter = cmd
             break
             
@@ -80,8 +86,8 @@ COMMANDS = {
     "run": run_command,
     "test": test_command,
     "debug": debug_command,
-    "docs": docs_command,    # O handler em docs.py agora trata a flag --serve
-    "compile": compile_command,
+    "docs": docs_command,
+    "compile": compile_command, # Agora aponta para o handler local
     "log": log_command,
     "seed": seed_command
 }

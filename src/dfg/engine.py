@@ -14,23 +14,89 @@ from dfg.logging import logger
 from dfg.state import StateManager 
 from dfg.artifacts import ArtifactManager
 from dfg.compiler import SQLCompiler  # <-- Nosso novo compilador Jinja
+from dfg.snapshot import SnapshotRunner
 
 class DFGEngine:
     def __init__(self, project_dir: str):
+        # 1. Caminhos Fundamentais
         self.project_dir = project_dir
+        self.models_dir = os.path.join(self.project_dir, "models")
+        self.snapshots_dir = os.path.join(self.project_dir, "snapshots")
+        self.seeds_dir = os.path.join(self.project_dir, "seeds")
         
+        # 2. Inicialização de Core Services
         logger.setup(self.project_dir)
         self.artifact_manager = ArtifactManager(self.project_dir)
-        
+        self.state_manager = StateManager(self.project_dir)
         self.config = self._load_config()
-        self.models_dir = os.path.join(self.project_dir, "models")
+        
+        # 3. Motores de Tradução e Execução
+        # Centralizamos o compilador aqui para que todos os comandos usem o mesmo motor Jinja
+        self.compiler = SQLCompiler() 
+        self.snapshot_runner = SnapshotRunner(self)
+        
+        # 4. Registros de Estado do DAG
         self.models_registry = {}
         self.dependencies_map = {}
-        self.state_manager = StateManager(self.project_dir)
         
-        # Locks para garantir thread-safety no console e no cache de dados
+        # 5. Concorrência e Thread-Safety
+        # Locks para garantir integridade no console e no cache de dados
         self.print_lock = threading.Lock()
         self.cache_lock = threading.Lock()
+
+        # 6. Adaptador de Banco de Dados (Opcional: carregar aqui ou sob demanda)
+        # self.adapter = self._init_adapter()
+        
+    def snapshots(self):
+        """
+        Orquestrador principal para processar todos os arquivos de snapshot.
+        """
+        logger.info("Iniciando processamento de Snapshots (SCD Type 2)...")
+        
+        # 1. Verificar se a pasta de snapshots existe
+        if not os.path.exists(self.snapshots_dir):
+            logger.warning(f"Diretório de snapshots não encontrado em: {self.snapshots_dir}")
+            return
+
+        # 2. Instanciar o executor de snapshots
+        runner = SnapshotRunner(self)
+        
+        # 3. Listar todos os arquivos .sql na pasta snapshots/
+        snapshot_files = [f for f in os.listdir(self.snapshots_dir) if f.endswith(".sql")]
+        
+        if not snapshot_files:
+            logger.info("Nenhum arquivo de snapshot encontrado para processar.")
+            return
+
+        success_count = 0
+        for file_name in snapshot_files:
+            file_path = os.path.join(self.snapshots_dir, file_name)
+            
+            try:
+                with open(file_path, "r", encoding="utf-8") as f:
+                    raw_sql = f.read()
+
+                # 4. Parsing: O Compilador extrai config e limpa o SQL
+                snapshot_data = self.compiler.parse_snapshot(raw_sql)
+                
+                if not snapshot_data:
+                    logger.error(f"Arquivo {file_name} não possui um bloco '{{% snapshot %}}' válido.")
+                    continue
+
+                # 5. Execução: O Runner aplica a lógica de SCD2 no banco
+                success = runner.run_snapshot(
+                    snapshot_name=snapshot_data["snapshot_name"],
+                    parsed_config=snapshot_data["config"],
+                    compiled_source_sql=snapshot_data["compiled_sql"]
+                )
+
+                if success:
+                    success_count += 1
+
+            except Exception as e:
+                logger.error(f"Falha crítica ao processar snapshot {file_name}: {e}")
+
+        logger.info(f"Processamento concluído: {success_count}/{len(snapshot_files)} snapshots executados.")
 
     def _load_config(self) -> dict:
         project_toml_path = os.path.join(self.project_dir, "dfg_project.toml")

@@ -1,5 +1,6 @@
 # src/dfg/compile.py
 import jinja2
+import re
 from dfg.logging import logger
 
 class ModelContext:
@@ -36,6 +37,47 @@ class SQLCompiler:
             lstrip_blocks=True,
             undefined=jinja2.StrictUndefined # SÊNIOR: Erra feio se usar variável não definida
         )
+    def parse_snapshot(self, raw_sql: str) -> dict:
+        """
+        Analisa um arquivo SQL em busca de blocos de snapshot e extrai suas configurações e query base.
+        """
+        # 1. Encontrar o bloco principal: {% snapshot nome_do_snapshot %} ... {% endsnapshot %}
+        # re.DOTALL permite que o '.' capture quebras de linha
+        snapshot_pattern = r"{%\s*snapshot\s+(\w+)\s*%}(.*?){%\s*endsnapshot\s*%}"
+        match = re.search(snapshot_pattern, raw_sql, re.DOTALL)
+        
+        if not match:
+            return None # Não é um arquivo de snapshot válido
+            
+        snapshot_name = match.group(1)
+        inner_content = match.group(2)
+        
+        # 2. Encontrar o bloco de configuração: {{ config(...) }}
+        config_pattern = r"{{\s*config\((.*?)\)\s*}}"
+        config_match = re.search(config_pattern, inner_content, re.DOTALL)
+        
+        config_dict = {}
+        if config_match:
+            config_str = config_match.group(1)
+            # Extrai pares chave-valor simples, ex: unique_key='user_id'
+            kwargs_pattern = r"(\w+)\s*=\s*['\"]([^'\"]+)['\"]"
+            for key, value in re.findall(kwargs_pattern, config_str):
+                config_dict[key] = value
+                
+            # Remove o bloco de config do SQL para sobrar apenas o SELECT
+            source_sql = re.sub(config_pattern, '', inner_content, flags=re.DOTALL).strip()
+        else:
+            source_sql = inner_content.strip()
+            
+        # 3. Compila o SQL restante (resolve as tags Jinja padrão, como o {{ ref('stg_users') }})
+        # Aqui assumimos que o método `compile` ou `render` já existe na sua classe SQLCompiler
+        compiled_sql = self.compile_query(source_sql) # Ajuste para o nome do método que renderiza jinja
+        
+        return {
+            "snapshot_name": snapshot_name,
+            "config": config_dict,
+            "compiled_sql": compiled_sql
+        }
 
     def compile(self, sql_raw: str, model_name: str):
         """
