@@ -3,8 +3,6 @@ import os
 import importlib.util
 from dfg.logging import logger
 
-# Catálogo mestre com os bancos suportados.
-# Apenas os que estiverem instalados na máquina irão aparecer para o usuário.
 DB_CATALOG = [
     {"name": "DuckDB", "lib": "duckdb", "type": "duckdb", "fields": 'database = "{name}_dev.db"'},
     {"name": "PostgreSQL (psycopg2)", "lib": "psycopg2", "type": "postgres", "fields": 'host = "localhost"\nport = 5432\nuser = "admin"\npassword = "password"\ndatabase = "{name}_db"\nschema = "public"'},
@@ -33,7 +31,6 @@ ANVIL_ASCII = """
 """
 
 def is_lib_installed(lib_name):
-    """Verifica de forma segura se a biblioteca está instalada no venv."""
     try:
         base_module = lib_name.split('.')[0] 
         spec = importlib.util.find_spec(base_module)
@@ -42,7 +39,6 @@ def is_lib_installed(lib_name):
         return False
 
 def discover_installed_drivers():
-    """Retorna drivers instalados na máquina."""
     available = {}
     index = 1
     for db in DB_CATALOG:
@@ -53,7 +49,7 @@ def discover_installed_drivers():
 
 def init_command(args):
     print(ANVIL_ASCII)
-    logger.success("Bem-vindo à Forja Data Forge (DFG)!")
+    logger.success("Bem-vindo ao Data Forge")
     print("-" * 45)
     
     project_name = input("Nome do seu projeto (ex: dfg_project): ") or "dfg_project"

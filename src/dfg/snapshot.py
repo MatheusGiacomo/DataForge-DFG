@@ -5,7 +5,6 @@ from dfg.logging import logger
 class SnapshotRunner:
     def __init__(self, engine):
         self.engine = engine
-        # Usamos UTC como padrão ouro para engenharia de dados
         self.current_timestamp = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
 
     def run_snapshot(self, snapshot_name, parsed_config, compiled_source_sql):

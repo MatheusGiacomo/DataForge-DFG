@@ -13,34 +13,30 @@ from dfg.adapters.factory import AdapterFactory
 from dfg.logging import logger
 from dfg.state import StateManager 
 from dfg.artifacts import ArtifactManager
-from dfg.compiler import SQLCompiler  # <-- Nosso novo compilador Jinja
+from dfg.compiler import SQLCompiler
 from dfg.snapshot import SnapshotRunner
 
 class DFGEngine:
     def __init__(self, project_dir: str):
-        # 1. Caminhos Fundamentais
         self.project_dir = project_dir
         self.models_dir = os.path.join(self.project_dir, "models")
         self.snapshots_dir = os.path.join(self.project_dir, "snapshots")
         self.seeds_dir = os.path.join(self.project_dir, "seeds")
         
-        # 2. Inicialização de Core Services
+        #Core Services
         logger.setup(self.project_dir)
         self.artifact_manager = ArtifactManager(self.project_dir)
         self.state_manager = StateManager(self.project_dir)
         self.config = self._load_config()
         
-        # 3. Motores de Tradução e Execução
-        # Centralizamos o compilador aqui para que todos os comandos usem o mesmo motor Jinja
         self.compiler = SQLCompiler() 
         self.snapshot_runner = SnapshotRunner(self)
         
-        # 4. Registros de Estado do DAG
+        #Registros de Estado do DAG
         self.models_registry = {}
         self.dependencies_map = {}
         
-        # 5. Concorrência e Thread-Safety
-        # Locks para garantir integridade no console e no cache de dados
+        #Concorrência e Thread-Safety
         self.print_lock = threading.Lock()
         self.cache_lock = threading.Lock()
 
@@ -49,19 +45,15 @@ class DFGEngine:
         
     def snapshots(self):
         """
-        Orquestrador principal para processar todos os arquivos de snapshot.
+        Orquestrador para processar os arquivos de snapshot.
         """
-        logger.info("Iniciando processamento de Snapshots (SCD Type 2)...")
+        logger.info("Iniciando processamento de Snapshots...")
         
-        # 1. Verificar se a pasta de snapshots existe
         if not os.path.exists(self.snapshots_dir):
             logger.warning(f"Diretório de snapshots não encontrado em: {self.snapshots_dir}")
             return
 
-        # 2. Instanciar o executor de snapshots
         runner = SnapshotRunner(self)
-        
-        # 3. Listar todos os arquivos .sql na pasta snapshots/
         snapshot_files = [f for f in os.listdir(self.snapshots_dir) if f.endswith(".sql")]
         
         if not snapshot_files:
