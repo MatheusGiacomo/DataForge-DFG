@@ -1,107 +1,196 @@
-# src/dfg/compile.py
-import jinja2
+# src/dfg/compiler.py
+"""
+Compilador Jinja2 para modelos SQL e snapshots do DataForge.
+
+Responsabilidades:
+- Renderizar templates Jinja2 em SQL puro
+- Extrair metadados de configuração ({{ config(...) }})
+- Rastrear dependências ({{ ref('model') }})
+- Fazer parsing de blocos {% snapshot %} ... {% endsnapshot %}
+"""
 import re
+
+import jinja2
+
 from dfg.logging import logger
+
 
 class ModelContext:
     """
-    Representa o contexto de execução de um modelo SQL.
-    Injetamos métodos aqui que estarão disponíveis dentro do {{ ... }} do Jinja.
+    Contexto de execução injetado nos templates Jinja2.
+
+    Expõe as funções `ref()` e `config()` que o autor do modelo
+    pode usar diretamente no SQL, sem importações extras.
     """
-    def __init__(self, model_name, target_schema):
+
+    def __init__(self, model_name: str, target_schema: str):
         self.model_name = model_name
         self.target_schema = target_schema
-        self.model_config = {} 
-        self.dependencies = [] 
+        self.model_config: dict = {}
+        self.dependencies: list[str] = []
 
-    def ref(self, referenced_model):
-        """Implementação da função {{ ref('nome_da_tabela') }}."""
+    def ref(self, referenced_model: str) -> str:
+        """
+        Macro {{ ref('nome_da_tabela') }}.
+
+        Registra a dependência e retorna o nome da tabela para ser
+        interpolado no SQL final.
+        """
         self.dependencies.append(referenced_model)
-        # Retorna apenas o nome por enquanto; 
-        # Futuramente pode retornar schema.tabela conforme o banco.
         return referenced_model
 
-    def config(self, **kwargs):
-        """Implementação da função {{ config(materialized='table') }}."""
+    def config(self, **kwargs) -> str:
+        """
+        Macro {{ config(materialized='table') }}.
+
+        Armazena as configurações do modelo. Retorna string vazia
+        para que o Jinja não insira 'None' no SQL renderizado.
+        """
         self.model_config.update(kwargs)
-        # Retorna string vazia para o Jinja não renderizar 'None' no SQL final
         return ""
 
+
 class SQLCompiler:
-    def __init__(self, target_schema):
+    """
+    Motor de compilação Jinja2 para o DataForge.
+
+    Parâmetros
+    ----------
+    target_schema : str
+        Schema de destino que será disponibilizado como variável
+        nos templates ({{ target_schema }}).
+    """
+
+    def __init__(self, target_schema: str = "public"):
         self.target_schema = target_schema
-        # Configuração do ambiente Jinja
         self.env = jinja2.Environment(
             loader=jinja2.BaseLoader(),
             trim_blocks=True,
             lstrip_blocks=True,
-            undefined=jinja2.StrictUndefined # SÊNIOR: Erra feio se usar variável não definida
+            # StrictUndefined: falha imediatamente em variáveis não definidas,
+            # evitando bugs silenciosos por typos nos templates.
+            undefined=jinja2.StrictUndefined,
         )
-    def parse_snapshot(self, raw_sql: str) -> dict:
-        """
-        Analisa um arquivo SQL em busca de blocos de snapshot e extrai suas configurações e query base.
-        """
-        # 1. Encontrar o bloco principal: {% snapshot nome_do_snapshot %} ... {% endsnapshot %}
-        # re.DOTALL permite que o '.' capture quebras de linha
-        snapshot_pattern = r"{%\s*snapshot\s+(\w+)\s*%}(.*?){%\s*endsnapshot\s*%}"
-        match = re.search(snapshot_pattern, raw_sql, re.DOTALL)
-        
-        if not match:
-            return None # Não é um arquivo de snapshot válido
-            
-        snapshot_name = match.group(1)
-        inner_content = match.group(2)
-        
-        # 2. Encontrar o bloco de configuração: {{ config(...) }}
-        config_pattern = r"{{\s*config\((.*?)\)\s*}}"
-        config_match = re.search(config_pattern, inner_content, re.DOTALL)
-        
-        config_dict = {}
-        if config_match:
-            config_str = config_match.group(1)
-            # Extrai pares chave-valor simples, ex: unique_key='user_id'
-            kwargs_pattern = r"(\w+)\s*=\s*['\"]([^'\"]+)['\"]"
-            for key, value in re.findall(kwargs_pattern, config_str):
-                config_dict[key] = value
-                
-            # Remove o bloco de config do SQL para sobrar apenas o SELECT
-            source_sql = re.sub(config_pattern, '', inner_content, flags=re.DOTALL).strip()
-        else:
-            source_sql = inner_content.strip()
-            
-        # 3. Compila o SQL restante (resolve as tags Jinja padrão, como o {{ ref('stg_users') }})
-        # Aqui assumimos que o método `compile` ou `render` já existe na sua classe SQLCompiler
-        compiled_sql = self.compile_query(source_sql) # Ajuste para o nome do método que renderiza jinja
-        
-        return {
-            "snapshot_name": snapshot_name,
-            "config": config_dict,
-            "compiled_sql": compiled_sql
-        }
 
-    def compile(self, sql_raw: str, model_name: str):
+    # ------------------------------------------------------------------
+    # API Pública
+    # ------------------------------------------------------------------
+
+    def compile(self, sql_raw: str, model_name: str) -> dict:
         """
-        Transforma SQL com Jinja em SQL puro e extrai metadados.
+        Compila um arquivo SQL com Jinja2 e extrai seus metadados.
+
+        Retorna
+        -------
+        dict com chaves:
+            - ``sql``: SQL puro, pronto para execução
+            - ``depends_on``: lista de modelos referenciados via ref()
+            - ``config``: dicionário de configuração (materialized, unique_key, …)
         """
         context = ModelContext(model_name, self.target_schema)
-
         try:
             template = self.env.from_string(sql_raw)
-            # Renderiza passando as funções 'ref' e 'config' como globais do template
             sql_compiled = template.render(
                 ref=context.ref,
                 config=context.config,
-                target_schema=self.target_schema
+                target_schema=self.target_schema,
             )
-
             return {
                 "sql": sql_compiled.strip(),
-                "depends_on": list(set(context.dependencies)), # Remove duplicatas de refs
-                "config": context.model_config
+                "depends_on": list(set(context.dependencies)),
+                "config": context.model_config,
             }
         except jinja2.exceptions.TemplateSyntaxError as e:
-            logger.error(f"Erro de sintaxe no modelo '{model_name}' (Linha {e.lineno}): {e.message}")
+            logger.error(
+                f"Erro de sintaxe Jinja no modelo '{model_name}' "
+                f"(linha {e.lineno}): {e.message}"
+            )
             raise
         except Exception as e:
             logger.error(f"Erro inesperado ao compilar '{model_name}': {e}")
             raise
+
+    def render(self, sql_raw: str) -> str:
+        """
+        Renderização simples de Jinja2 sem contexto de modelo.
+
+        Usado internamente pelo parse_snapshot para limpar as tags
+        do SQL interno do bloco snapshot antes de executá-lo.
+        """
+        try:
+            template = self.env.from_string(sql_raw)
+            return template.render(target_schema=self.target_schema).strip()
+        except jinja2.exceptions.TemplateSyntaxError as e:
+            logger.error(f"Erro de sintaxe Jinja ao renderizar SQL (linha {e.lineno}): {e.message}")
+            raise
+        except Exception as e:
+            logger.error(f"Erro inesperado ao renderizar SQL: {e}")
+            raise
+
+    def parse_snapshot(self, raw_sql: str) -> dict | None:
+        """
+        Analisa um arquivo de snapshot no formato:
+
+        .. code-block:: sql
+
+            {% snapshot nome_do_snapshot %}
+            {{ config(unique_key='id', strategy='timestamp', updated_at='updated_at') }}
+            SELECT * FROM {{ ref('stg_users') }}
+            {% endsnapshot %}
+
+        Retorna
+        -------
+        dict com chaves:
+            - ``snapshot_name``: nome do snapshot
+            - ``config``: dicionário de configuração extraído de {{ config(...) }}
+            - ``compiled_sql``: SQL da query SELECT compilado (Jinja resolvido)
+
+        Retorna ``None`` se o arquivo não contiver um bloco snapshot válido.
+        """
+        # Extrai o bloco snapshot completo
+        snapshot_pattern = r"\{%\s*snapshot\s+(\w+)\s*%\}(.*?)\{%\s*endsnapshot\s*%\}"
+        match = re.search(snapshot_pattern, raw_sql, re.DOTALL)
+
+        if not match:
+            return None
+
+        snapshot_name = match.group(1)
+        inner_content = match.group(2)
+
+        # Extrai o bloco {{ config(...) }} e seus pares chave=valor
+        config_pattern = r"\{\{\s*config\((.*?)\)\s*\}\}"
+        config_match = re.search(config_pattern, inner_content, re.DOTALL)
+
+        config_dict: dict = {}
+        if config_match:
+            config_str = config_match.group(1)
+            # Captura pares: chave='valor' ou chave="valor"
+            for key, value in re.findall(r"(\w+)\s*=\s*['\"]([^'\"]+)['\"]", config_str):
+                config_dict[key] = value
+
+            # Remove o bloco config do conteúdo para isolar a query SELECT
+            source_sql = re.sub(config_pattern, "", inner_content, flags=re.DOTALL).strip()
+        else:
+            source_sql = inner_content.strip()
+
+        # Usa o método render() para resolver referências Jinja dentro da query
+        # (ex: {{ ref('stg_model') }}) antes de entregar ao SnapshotRunner.
+        # Nota: usamos um ModelContext temporário para registrar dependências
+        # sem precisar de um nome de modelo real.
+        context = ModelContext(snapshot_name, self.target_schema)
+        try:
+            template = self.env.from_string(source_sql)
+            compiled_sql = template.render(
+                ref=context.ref,
+                config=context.config,
+                target_schema=self.target_schema,
+            ).strip()
+        except Exception as e:
+            logger.error(f"Erro ao compilar SQL do snapshot '{snapshot_name}': {e}")
+            raise
+
+        return {
+            "snapshot_name": snapshot_name,
+            "config": config_dict,
+            "compiled_sql": compiled_sql,
+        }
