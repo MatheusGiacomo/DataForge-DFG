@@ -1,44 +1,140 @@
 # src/dfg/initialization.py
-import os
+"""
+Comando 'dfg init' do DataForge.
+
+Inicializa a estrutura de um novo projeto com:
+- dfg_project.toml (configuração do projeto)
+- profiles.toml (credenciais de conexão por ambiente)
+- Estrutura de pastas padrão (models/, seeds/, snapshots/, …)
+- Arquivos de boilerplate para começar rapidamente
+"""
 import importlib.util
+import os
+
 from dfg.logging import logger
 
+# ------------------------------------------------------------------
+# Catálogo de bancos suportados
+# ------------------------------------------------------------------
+
 DB_CATALOG = [
-    {"name": "DuckDB", "lib": "duckdb", "type": "duckdb", "fields": 'database = "{name}_dev.db"'},
-    {"name": "PostgreSQL (psycopg2)", "lib": "psycopg2", "type": "postgres", "fields": 'host = "localhost"\nport = 5432\nuser = "admin"\npassword = "password"\ndatabase = "{name}_db"\nschema = "public"'},
-    {"name": "MySQL", "lib": "mysql.connector", "type": "mysql", "fields": 'host = "localhost"\nport = 3306\nuser = "root"\npassword = "password"\ndatabase = "{name}_db"'},
-    {"name": "SQL Server (pyodbc)", "lib": "pyodbc", "type": "sqlserver", "fields": 'driver = "ODBC Driver 17 for SQL Server"\nserver = "localhost"\nuser = "sa"\npassword = "password"\ndatabase = "{name}_db"'},
-    {"name": "BigQuery", "lib": "google.cloud.bigquery", "type": "bigquery", "fields": 'method = "service-account"\nproject = "seu-projeto-gcp"\ndataset = "{name}_dataset"\nkeyfile = "caminho/para/keyfile.json"'},
-    {"name": "Snowflake", "lib": "snowflake.connector", "type": "snowflake", "fields": 'account = "xyz123.region"\nuser = "admin"\npassword = "password"\nwarehouse = "compute_wh"\ndatabase = "{name}_db"\nschema = "public"'},
-    {"name": "SQLite (Nativo)", "lib": "sqlite3", "type": "sqlite", "fields": 'database = "{name}_sqlite.db"'}
+    {
+        "name": "DuckDB",
+        "lib": "duckdb",
+        "type": "duckdb",
+        "fields": 'database = "{name}_dev.db"',
+    },
+    {
+        "name": "PostgreSQL (psycopg2)",
+        "lib": "psycopg2",
+        "type": "postgres",
+        "fields": (
+            'host = "localhost"\n'
+            "port = 5432\n"
+            'user = "admin"\n'
+            'password = "password"\n'
+            'database = "{name}_db"\n'
+            'schema = "public"'
+        ),
+    },
+    {
+        "name": "MySQL",
+        "lib": "mysql.connector",
+        "type": "mysql",
+        "fields": (
+            'host = "localhost"\n'
+            "port = 3306\n"
+            'user = "root"\n'
+            'password = "password"\n'
+            'database = "{name}_db"'
+        ),
+    },
+    {
+        "name": "SQL Server (pyodbc)",
+        "lib": "pyodbc",
+        "type": "sqlserver",
+        "fields": (
+            'driver = "ODBC Driver 17 for SQL Server"\n'
+            'server = "localhost"\n'
+            'user = "sa"\n'
+            'password = "password"\n'
+            'database = "{name}_db"'
+        ),
+    },
+    {
+        "name": "BigQuery",
+        "lib": "google.cloud.bigquery",
+        "type": "bigquery",
+        "fields": (
+            'method = "service-account"\n'
+            'project = "seu-projeto-gcp"\n'
+            'dataset = "{name}_dataset"\n'
+            'keyfile = "caminho/para/keyfile.json"'
+        ),
+    },
+    {
+        "name": "Snowflake",
+        "lib": "snowflake.connector",
+        "type": "snowflake",
+        "fields": (
+            'account = "xyz123.region"\n'
+            'user = "admin"\n'
+            'password = "password"\n'
+            'warehouse = "compute_wh"\n'
+            'database = "{name}_db"\n'
+            'schema = "public"'
+        ),
+    },
+    {
+        "name": "SQLite (Nativo)",
+        "lib": "sqlite3",
+        "type": "sqlite",
+        "fields": 'database = "{name}_sqlite.db"',
+    },
 ]
 
-ANVIL_ASCII = """
-                           ████████████████████████████████
-       ███████████████████▓▓████████████████████████████▒
-        ▒█████████████████▓████████████████████████▓
-          ▒███████████▒█████████████████████████▒
-             ▓████████░███████████████████████
-                       █████████████████████░
-                            ███████████████
-                             █████████████
-                             █████████████
-                            ░████   ░█████
-                           ▓██▓▒█████▓▓████
-                        ▓████████████████████░
-                     ░█████ ██████████████▓█████
-                     ░███████           ░███████
+ANVIL_ASCII = r"""
+                       ████████████████████████████████
+   ███████████████████▓▓████████████████████████████▒
+    ▒█████████████████▓████████████████████████▓
+      ▒███████████▒█████████████████████████▒
+         ▓████████░███████████████████████
+                   █████████████████████░
+                        ███████████████
+                         █████████████
+                         █████████████
+                        ░████   ░█████
+                       ▓██▓▒█████▓▓████
+                    ▓████████████████████░
+                 ░█████ ██████████████▓█████
+                 ░███████           ░███████
 """
 
-def is_lib_installed(lib_name):
+# ------------------------------------------------------------------
+# Helpers
+# ------------------------------------------------------------------
+
+
+def is_lib_installed(lib_name: str) -> bool:
+    """
+    Verifica se uma biblioteca Python está instalada sem importá-la.
+
+    Usa importlib.util.find_spec() no módulo raiz para evitar erros
+    com submódulos (ex: 'google.cloud.bigquery' → verifica 'google').
+    """
     try:
-        base_module = lib_name.split('.')[0] 
+        base_module = lib_name.split(".")[0]
         spec = importlib.util.find_spec(base_module)
         return spec is not None
-    except Exception:
+    except (ModuleNotFoundError, ValueError):
         return False
 
-def discover_installed_drivers():
+
+def discover_installed_drivers() -> dict:
+    """
+    Retorna um dicionário indexado (1, 2, …) dos bancos disponíveis
+    no ambiente atual do usuário.
+    """
     available = {}
     index = 1
     for db in DB_CATALOG:
@@ -47,82 +143,15 @@ def discover_installed_drivers():
             index += 1
     return available
 
-def init_command(args):
-    print(ANVIL_ASCII)
-    logger.success("Bem-vindo ao Data Forge")
-    print("-" * 45)
-    
-    project_name = input("Nome do seu projeto (ex: dfg_project): ") or "dfg_project"
-    
-    installed_dbs = discover_installed_drivers()
-    
-    print("\nBancos de dados identificados no seu ambiente:")
-    for idx, db in installed_dbs.items():
-        print(f"[{idx}] {db['name']}")
-    
-    while True:
-        choice = input("\nDigite o número para o banco de preferência: ")
-        if choice in installed_dbs:
-            selected_db = installed_dbs[choice]
-            break
-        else:
-            logger.error("Opção inválida. Digite um dos números da lista acima.")
 
-    logger.success(f"Configurando forja para: {selected_db['name']}")
+# ------------------------------------------------------------------
+# Conteúdo dos arquivos boilerplate
+# ------------------------------------------------------------------
 
-    # 1. Cria o dfg_project.toml
-    project_toml = f"""[project]
-name = "{project_name}"
-profile = "{project_name}"
-target = "dev"
-threads = 4
-"""
-    with open("dfg_project.toml", "w", encoding="utf-8") as f:
-        f.write(project_toml)
-        
-    # 2. Cria o profiles.toml
-    conn_fields = selected_db["fields"].format(name=project_name)
-    
-    profiles_toml = f"""[{project_name}]
-target = "dev"
+_EXAMPLE_SQL = "{{ config(materialized='table') }}\n\nSELECT 1 AS id, 'Data Forge' AS tool\n"
 
-[{project_name}.outputs.dev]
-type = "{selected_db['type']}"
-{conn_fields}
-
-[{project_name}.outputs.prod]
-type = "{selected_db['type']}"
-# Substitua pelas Credenciais de Produção:
-{conn_fields.replace('dev', 'prod').replace('localhost', '10.0.0.1')}
-"""
-    with open("profiles.toml", "w", encoding="utf-8") as f:
-        f.write(profiles_toml)
-        
-    # 3. Estrutura de Pastas Profissional (Snapshots inclusa)
-    folders = [
-        "models", 
-        "snapshots",  # Nova pasta para SCD Tipo 2
-        "seeds", 
-        "analysis", 
-        "tests",
-        "target/compiled"
-    ]
-    for folder in folders:
-        os.makedirs(folder, exist_ok=True)
-    
-    # 4. Boilerplates (Arquivos iniciais para ajudar o usuário)
-    
-    # Exemplo de Modelo
-    example_sql = os.path.join("models", "my_first_model.sql")
-    if not os.path.exists(example_sql):
-        with open(example_sql, "w", encoding="utf-8") as f:
-            f.write("{{ config(materialized='table') }}\n\nSELECT 1 as id, 'Data Forge' as tool")
-
-    # Exemplo de Snapshot (SCD2)
-    example_snapshot = os.path.join("snapshots", "my_first_snapshot.sql")
-    if not os.path.exists(example_snapshot):
-        with open(example_snapshot, "w", encoding="utf-8") as f:
-            f.write("""{% snapshot my_first_snapshot %}
+_EXAMPLE_SNAPSHOT = """\
+{% snapshot my_first_snapshot %}
 
 {{
     config(
@@ -134,7 +163,141 @@ type = "{selected_db['type']}"
 
 SELECT * FROM {{ ref('my_first_model') }}
 
-{% endsnapshot %}""")
+{% endsnapshot %}
+"""
 
-    print("-" * 45)
-    logger.success(f"Projeto '{project_name}' forjado com sucesso!")
+_EXAMPLE_SCHEMA_YAML = """\
+version: 1
+
+models:
+  - name: my_first_model
+    description: "Modelo de exemplo gerado pelo dfg init."
+    columns:
+      - name: id
+        tests:
+          - not_null
+          - unique
+"""
+
+# ------------------------------------------------------------------
+# Comando principal
+# ------------------------------------------------------------------
+
+
+def init_command(args) -> None:
+    """
+    Inicializa um novo projeto DataForge no diretório atual.
+
+    Fluxo:
+    1. Solicita o nome do projeto
+    2. Detecta os drivers de banco instalados no ambiente
+    3. Permite o usuário escolher o banco preferido
+    4. Gera dfg_project.toml, profiles.toml e estrutura de pastas
+    5. Cria arquivos de boilerplate para acelerar o início
+    """
+    # Inicializa o logger para o diretório atual (sem projeto ainda)
+    logger.setup(os.getcwd())
+
+    print(ANVIL_ASCII)
+    logger.success("Bem-vindo ao Data Forge!")
+    print("-" * 50)
+
+    project_name = input("Nome do projeto (ex: meu_projeto): ").strip() or "dfg_project"
+
+    # Validação simples do nome do projeto
+    if not project_name.replace("_", "").replace("-", "").isalnum():
+        logger.error("Nome do projeto deve conter apenas letras, números, _ e -.")
+        return
+
+    installed_dbs = discover_installed_drivers()
+
+    if not installed_dbs:
+        logger.error(
+            "Nenhum driver de banco de dados detectado no ambiente. "
+            "Instale pelo menos um: pip install duckdb  (recomendado para iniciar)"
+        )
+        return
+
+    print("\nBancos de dados detectados no seu ambiente:")
+    for idx, db in installed_dbs.items():
+        print(f"  [{idx}] {db['name']}")
+
+    while True:
+        choice = input("\nEscolha o número do banco preferido: ").strip()
+        if choice in installed_dbs:
+            selected_db = installed_dbs[choice]
+            break
+        logger.error(f"Opção inválida. Escolha um número entre 1 e {len(installed_dbs)}.")
+
+    logger.success(f"Configurando projeto '{project_name}' com: {selected_db['name']}")
+
+    # --- Geração do dfg_project.toml ---
+    project_toml = (
+        f"[project]\n"
+        f'name = "{project_name}"\n'
+        f'profile = "{project_name}"\n'
+        f'target = "dev"\n'
+        f"threads = 4\n"
+    )
+    _write_file("dfg_project.toml", project_toml)
+
+    # --- Geração do profiles.toml ---
+    conn_fields = selected_db["fields"].format(name=project_name)
+    prod_fields = conn_fields.replace("_dev", "_prod").replace("localhost", "10.0.0.1")
+
+    profiles_toml = (
+        f"[{project_name}]\n"
+        f'target = "dev"\n'
+        f"\n"
+        f"[{project_name}.outputs.dev]\n"
+        f'type = "{selected_db["type"]}"\n'
+        f"{conn_fields}\n"
+        f"\n"
+        f"[{project_name}.outputs.prod]\n"
+        f'type = "{selected_db["type"]}"\n'
+        f"# Substitua pelas credenciais de produção:\n"
+        f"{prod_fields}\n"
+    )
+    _write_file("profiles.toml", profiles_toml)
+
+    # --- Estrutura de pastas ---
+    folders = [
+        "models",
+        "snapshots",
+        "seeds",
+        "analysis",
+        "tests",
+        "logs",
+        os.path.join("target", "compiled"),
+    ]
+    for folder in folders:
+        os.makedirs(folder, exist_ok=True)
+
+    # --- Arquivos de boilerplate (não sobrescreve se já existem) ---
+    _write_file_if_absent(os.path.join("models", "my_first_model.sql"), _EXAMPLE_SQL)
+    _write_file_if_absent(os.path.join("snapshots", "my_first_snapshot.sql"), _EXAMPLE_SNAPSHOT)
+    _write_file_if_absent(os.path.join("models", "schema.yml"), _EXAMPLE_SCHEMA_YAML)
+
+    print("-" * 50)
+    logger.success(f"Projeto '{project_name}' forjado com sucesso! 🔥")
+    print(
+        "\nPróximos passos:\n"
+        "  1. Revise o profiles.toml com suas credenciais de banco\n"
+        "  2. Crie seus modelos na pasta models/\n"
+        "  3. Execute: dfg run\n"
+    )
+
+
+# ------------------------------------------------------------------
+# Utilitários internos
+# ------------------------------------------------------------------
+
+
+def _write_file(path: str, content: str) -> None:
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(content)
+
+
+def _write_file_if_absent(path: str, content: str) -> None:
+    if not os.path.exists(path):
+        _write_file(path, content)

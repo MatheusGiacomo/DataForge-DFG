@@ -1,16 +1,92 @@
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools>=70.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "dfg"
-version = "0.1.0"
-description = "A vanilla Python ELT framework"
+name            = "dataforge-dfg"
+version         = "0.1.0"
+description     = "A lightweight ELT framework in pure Python — dbt meets dlt"
+readme          = "README.md"
+license         = { file = "LICENSE" }
 requires-python = ">=3.11"
+keywords        = ["elt", "etl", "data", "pipeline", "dbt", "dlt", "sql", "analytics"]
+
+authors = [
+    { name = "Matheus", email = "matheusdigiacomo12@email.com" },
+]
+
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Topic :: Database",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: OS Independent",
+    "Environment :: Console",
+]
+
+dependencies = [
+    "jinja2>=3.1.0",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+duckdb   = ["duckdb>=0.10.0"]
+postgres = ["psycopg2-binary>=2.9.0"]
+mysql    = ["mysql-connector-python>=8.0.0"]
+all      = [
+    "duckdb>=0.10.0",
+    "psycopg2-binary>=2.9.0",
+    "mysql-connector-python>=8.0.0",
+]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-cov>=5.0.0",
+    "ruff>=0.4.0",
+    "build>=1.2.0",
+    "twine>=5.0.0",
+    "duckdb>=0.10.0",
+]
 
 [project.scripts]
 dfg = "dfg.cli:main"
 
+[project.urls]
+Homepage      = "https://github.com/seu-usuario/dataforge"
+Documentation = "https://github.com/seu-usuario/dataforge/blob/main/DOCUMENTACAO.md"
+Repository    = "https://github.com/seu-usuario/dataforge"
+"Bug Tracker" = "https://github.com/seu-usuario/dataforge/issues"
+Changelog     = "https://github.com/seu-usuario/dataforge/blob/main/CHANGELOG.md"
+
 [tool.setuptools.packages.find]
-where = ["src"]  # Indica onde o código fonte reside
-include = ["dfg*"] # Garante que apenas o pacote dfg seja incluído
+where   = ["src"]
+include = ["dfg*"]
+
+[tool.setuptools.package-data]
+"dfg" = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths    = ["tests"]
+addopts      = "-v --tb=short"
+python_files = ["test_*.py"]
+
+[tool.ruff]
+line-length    = 100
+target-version = "py311"
+src            = ["src"]
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "UP", "B", "SIM"]
+ignore = ["E501", "B008"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101"]
+
+[tool.ruff.format]
+quote-style = "double"
