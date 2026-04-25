@@ -1,9 +1,114 @@
-/.venv
-/.vscode
-__pycache__
-catalog
-teste
-/tests_first_project
-/dfg.egg-info
-/target
-logs
+# =============================================================================
+# DataForge — .gitignore
+# =============================================================================
+
+# Credenciais e estado — NUNCA versionar
+profiles.toml
+.dfg_state.json
+
+# Artefatos gerados pelo DataForge
+target/
+logs/
+
+# Bancos de dados locais
+*.db
+*.duckdb
+*.sqlite
+*.sqlite3
+
+# =============================================================================
+# Python
+# =============================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.pyd
+
+# Distribuição / empacotamento
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Ambientes virtuais
+.venv/
+venv/
+ENV/
+env/
+env.bak/
+venv.bak/
+.virtualenv/
+
+# =============================================================================
+# Testes e Cobertura
+# =============================================================================
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+nosetests.xml
+test-results/
+
+# =============================================================================
+# IDEs
+# =============================================================================
+
+# VSCode
+.vscode/
+!.vscode/extensions.json
+
+# PyCharm / IntelliJ
+.idea/
+*.iml
+
+# =============================================================================
+# Sistema Operacional
+# =============================================================================
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Linux
+*~
+.fuse_hidden*
+.directory
+.Trash-*
+
+Teste
+DOCUMENTACAO.md
+REFATORACAO.md
+ROADMAP.md
+.github
+tests_first_project
+pyproject.toml
+tests
