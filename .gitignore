@@ -105,8 +105,7 @@ $RECYCLE.BIN/
 .Trash-*
 
 Teste
-DOCUMENTACAO.md
-REFATORACAO.md
 ROADMAP.md
+REFATORACAO.md
 tests_first_project
 pyproject.toml
