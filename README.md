@@ -1,5 +1,10 @@
 # DataForge
 
+[![PyPI version](https://badge.fury.io/py/dataforge-dfg.svg)](https://badge.fury.io/py/dataforge-dfg)
+[![Python](https://img.shields.io/badge/Python-3.11%2B-blue)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Status](https://img.shields.io/badge/Status-Beta-orange)]()
+
 **DataForge** is a lightweight, pure-Python ELT framework designed for data engineers who want the power of SQL-based transformations and Python-based ingestion in a single, dependency-minimal tool — without the overhead of heavy frameworks.
 
 It combines declarative SQL modeling (inspired by dbt) with programmable data ingestion (inspired by dlt), delivering a complete ELT pipeline from a single command-line interface.
