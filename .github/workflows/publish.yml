@@ -1,38 +1,34 @@
 # .github/workflows/publish.yml
-# Publica o pacote no PyPI automaticamente quando uma tag vX.Y.Z é criada.
-#
-# Pré-requisitos:
-#   1. Crie um API Token no PyPI (https://pypi.org/manage/account/token/)
-#   2. No repositório GitHub: Settings → Secrets → Actions → New secret
-#      Nome: PYPI_API_TOKEN   Valor: pypi-xxxx...
-
 name: Publish to PyPI
 
 on:
   push:
     tags:
-      - "v[0-9]+.[0-9]+.[0-9]+"   # ex: v0.1.0, v1.2.3
+      - "v[0-9]+.[0-9]+.[0-9]+"
 
 jobs:
   publish:
     name: "Build e Publish → PyPI"
     runs-on: ubuntu-latest
-    environment: pypi
-    permissions:
-      id-token: write
 
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
       - name: Instala build tools
-        run: pip install build
+        run: pip install build twine
 
       - name: Constrói o pacote
         run: python -m build
 
+      - name: Verifica integridade
+        run: twine check dist/*
+
       - name: Publica no PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
-        # Sem password — o OIDC autentica automaticamente
+        run: twine upload dist/*
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
