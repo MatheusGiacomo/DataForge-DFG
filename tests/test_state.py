@@ -1,5 +1,7 @@
 # tests/test_state.py
 """Testes unitários do StateManager."""
+import pytest
+
 from dfg.state import StateManager
 
 
@@ -48,7 +50,6 @@ class TestStateManager:
 
 # tests/test_engine.py
 """Testes de integração do DFGEngine."""
-import pytest
 
 
 class TestEngineRun:
