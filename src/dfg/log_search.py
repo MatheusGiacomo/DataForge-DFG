@@ -12,6 +12,7 @@ Uso via CLI:
     dfg log 150426DFG --run -d     (exporta para arquivo)
 """
 import os
+from contextlib import nullcontext
 
 from dfg.logging import logger
 
@@ -58,34 +59,59 @@ class LogSearcher:
             logger.error(f"Arquivo de log não encontrado: '{self.log_path}'.")
             return False
 
-        out_file = None
         dump_path = ""
-
         if dump:
             clean_id = log_id.replace("DFG", "").strip()
             suffix = f"_{command_filter}" if command_filter else ""
             dump_path = os.path.join(self.project_dir, f"{clean_id}{suffix}.txt")
-            try:
-                out_file = open(dump_path, "w", encoding="utf-8")
-            except OSError as e:
-                logger.error(f"Não foi possível criar o arquivo de exportação: {e}")
-                return False
 
-        # ------------------------------------------------------------------
-        # Máquina de estados finitos para parsing do log
-        # ------------------------------------------------------------------
+        # SIM115: usa context manager para o arquivo de saída.
+        # nullcontext() é usado quando não há dump, evitando o open() solto.
+        dump_ctx = open(dump_path, "w", encoding="utf-8") if dump else nullcontext()  # noqa: SIM115
+
+        try:
+            with dump_ctx as out_file:
+                logs_found = self._parse_log(log_id, command_filter, out_file)
+        except OSError as e:
+            logger.error(f"Não foi possível criar o arquivo de exportação: {e}")
+            return False
+
+        if not logs_found:
+            msg = f"Nenhum registro encontrado para o ID '{log_id}'"
+            if command_filter:
+                msg += f" com o filtro de comando '{command_filter}'"
+            logger.warn(msg + ".")
+            if dump and dump_path and os.path.exists(dump_path):
+                os.remove(dump_path)
+            return False
+
+        if dump and dump_path:
+            logger.success(f"Log exportado para: '{dump_path}'.")
+
+        return True
+
+    def _parse_log(
+        self,
+        log_id: str,
+        command_filter: str | None,
+        out_file,
+    ) -> bool:
+        """
+        Máquina de estados finitos para parsing do arquivo de log.
+
+        Retorna True se encontrou algum registro para o ID/filtro fornecido.
+        """
         in_target_day = False
         in_target_cmd = False
         logs_found = False
 
         try:
-            with open(self.log_path, "r", encoding="utf-8") as f:
+            with open(self.log_path, encoding="utf-8") as f:
                 for line in f:
                     # Estado 1: Detecta o cabeçalho do dia alvo
                     if "SESSÃO INICIADA EM:" in line and "ID:" in line:
                         in_target_day = log_id in line
                         in_target_cmd = False
-
                         if in_target_day and not command_filter:
                             self._output(line, out_file)
                             logs_found = True
@@ -97,8 +123,6 @@ class LogSearcher:
                     # Estado 2: Detecta blocos de comando
                     if "[EXECUÇÃO] Comando:" in line:
                         if command_filter:
-                            # Verifica se o comando exato está na linha
-                            # (usa split para evitar falsos positivos: 'run' vs 'running')
                             in_target_cmd = command_filter in line.split()
                             if in_target_cmd:
                                 self._output(line, out_file)
@@ -111,7 +135,6 @@ class LogSearcher:
 
                     # Estado 3: Linhas de log dos comandos
                     if not command_filter or in_target_cmd:
-                        # Pula separadores visuais quando filtrando por comando
                         if command_filter and "=" * 10 in line:
                             continue
                         self._output(line, out_file)
@@ -119,33 +142,13 @@ class LogSearcher:
 
         except OSError as e:
             logger.error(f"Falha ao ler o arquivo de log: {e}")
-        finally:
-            if out_file:
-                out_file.close()
 
-        # ------------------------------------------------------------------
-        # Feedback final
-        # ------------------------------------------------------------------
-        if not logs_found:
-            msg = f"Nenhum registro encontrado para o ID '{log_id}'"
-            if command_filter:
-                msg += f" com o filtro de comando '{command_filter}'"
-            logger.warn(msg + ".")
-
-            # Remove arquivo vazio criado à toa
-            if dump and dump_path and os.path.exists(dump_path):
-                os.remove(dump_path)
-            return False
-
-        if dump and dump_path:
-            logger.success(f"Log exportado para: '{dump_path}'.")
-
-        return True
+        return logs_found
 
     @staticmethod
     def _output(line: str, out_file) -> None:
         """Direciona a linha para o terminal ou para o arquivo de saída."""
-        if out_file:
+        if out_file is not None:
             out_file.write(line)
         else:
             print(line, end="")
