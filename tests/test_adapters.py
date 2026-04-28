@@ -1,9 +1,10 @@
 # tests/test_adapters.py
 """Testes de integração dos adaptadores usando DuckDB em memória."""
-import pytest
 import duckdb
-from dfg.adapters.generic import GenericDBAPIAdapter
+import pytest
+
 from dfg.adapters.factory import AdapterFactory
+from dfg.adapters.generic import GenericDBAPIAdapter
 
 
 @pytest.fixture

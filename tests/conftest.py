@@ -7,6 +7,7 @@ garantindo isolamento total e execução sem dependências externas.
 """
 import os
 import sys
+
 import pytest
 
 # Adiciona src/ ao path para os testes encontrarem o pacote dfg

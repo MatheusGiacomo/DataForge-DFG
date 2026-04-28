@@ -1,6 +1,7 @@
 # tests/test_dag.py
 """Testes unitários do DAGResolver."""
 import pytest
+
 from dfg.dag import DAGResolver
 
 

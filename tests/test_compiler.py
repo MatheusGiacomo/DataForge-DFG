@@ -1,6 +1,7 @@
 # tests/test_compiler.py
 """Testes unitários do SQLCompiler."""
 import pytest
+
 from dfg.compiler import SQLCompiler
 
 

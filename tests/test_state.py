@@ -145,7 +145,6 @@ class TestEngineSeed:
 
 class TestEngineTest:
     def test_contracts_pass(self, project_dir, engine):
-        import sys
         (project_dir / "models" / "clean.sql").write_text(
             "{{ config(materialized='table') }}\nSELECT 1 AS id, 'x' AS name",
             encoding="utf-8",
