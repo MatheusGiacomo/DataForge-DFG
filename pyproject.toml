@@ -5,11 +5,11 @@ build-backend = "setuptools.build_meta"
 [project]
 name            = "dataforge-dfg"
 version         = "0.1.0"
-description     = "A lightweight ELT framework in pure Python — dbt meets dlt"
+description     = "A lightweight ELT framework in pure Python — SQL transformations, Python ingestion, data contracts and snapshots in a single CLI tool"
 readme          = "README.md"
 license         = { file = "LICENSE" }
 requires-python = ">=3.11"
-keywords        = ["elt", "etl", "data", "pipeline", "dbt", "dlt", "sql", "analytics"]
+keywords        = ["elt", "etl", "data", "pipeline", "sql", "analytics", "data-engineering"]
 
 authors = [
     { name = "Matheus", email = "matheusdigiacomo12@email.com" },
@@ -37,14 +37,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-duckdb   = ["duckdb>=0.10.0"]
-postgres = ["psycopg2-binary>=2.9.0"]
-mysql    = ["mysql-connector-python>=8.0.0"]
-all      = [
-    "duckdb>=0.10.0",
-    "psycopg2-binary>=2.9.0",
-    "mysql-connector-python>=8.0.0",
-]
 dev = [
     "pytest>=8.0.0",
     "pytest-cov>=5.0.0",
@@ -58,11 +50,11 @@ dev = [
 dfg = "dfg.cli:main"
 
 [project.urls]
-Homepage      = "https://github.com/MatheusGiacomo/DataForge-DFG"
-Documentation = "https://github.com/MatheusGiacomo/DataForge-DFG/blob/main/DOCUMENTACAO.md"
-Repository    = "https://github.com/MatheusGiacomo/DataForge-DFG"
-"Bug Tracker" = "https://github.com/MatheusGiacomo/DataForge-DFG/issues"
-Changelog     = "https://github.com/MatheusGiacomo/DataForge-DFG/blob/main/CHANGELOG.md"
+Homepage      = "https://github.com/seu-usuario/dataforge"
+Documentation = "https://github.com/seu-usuario/dataforge/blob/main/DOCUMENTACAO.md"
+Repository    = "https://github.com/seu-usuario/dataforge"
+"Bug Tracker" = "https://github.com/seu-usuario/dataforge/issues"
+Changelog     = "https://github.com/seu-usuario/dataforge/blob/main/CHANGELOG.md"
 
 [tool.setuptools.packages.find]
 where   = ["src"]
