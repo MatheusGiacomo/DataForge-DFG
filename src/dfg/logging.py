@@ -8,8 +8,8 @@ gerados após logger.setup() ser invocado.
 """
 import logging
 import os
-import time
 import sys
+import time
 from datetime import datetime
 from threading import current_thread
 
@@ -92,7 +92,7 @@ class DFGLogger:
 
         # Verifica se o ID do dia já existe no arquivo
         if os.path.exists(self.log_path):
-            with open(self.log_path, "r", encoding="utf-8") as f:
+            with open(self.log_path, encoding="utf-8") as f:
                 if f"ID: {today_id}" in f.read():
                     self._header_written = True
                     return

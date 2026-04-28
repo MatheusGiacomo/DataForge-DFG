@@ -11,7 +11,7 @@ Colunas de controle adicionadas automaticamente:
     dfg_valid_to    TIMESTAMP  — fim do período (NULL = registro atual)
     dfg_is_active   BOOLEAN    — TRUE para o registro mais recente de cada chave
 """
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from dfg.logging import logger
 
@@ -33,7 +33,7 @@ class SnapshotRunner:
     def __init__(self, engine):
         self.engine = engine
         # Carimbo de tempo UTC único para toda a execução deste runner
-        self.current_timestamp: str = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        self.current_timestamp: str = datetime.now(tz=UTC).strftime("%Y-%m-%d %H:%M:%S")
 
     # ------------------------------------------------------------------
     # Orquestrador principal

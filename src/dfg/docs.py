@@ -154,7 +154,7 @@ def docs_command(args) -> None:
         )
         return
 
-    with open(manifest_path, "r", encoding="utf-8") as f:
+    with open(manifest_path, encoding="utf-8") as f:
         manifest = json.load(f)
 
     nodes, edges = _build_vis_data(manifest)

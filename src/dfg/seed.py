@@ -108,7 +108,7 @@ class SeedRunner:
 
                 try:
                     # Lê o CSV convertendo tipos automaticamente
-                    with open(filepath, mode="r", encoding="utf-8-sig") as f:
+                    with open(filepath, encoding="utf-8-sig") as f:
                         reader = csv.DictReader(f)
                         data = [
                             {k.strip(): self._infer_type(v) for k, v in row.items()}

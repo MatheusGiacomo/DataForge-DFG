@@ -30,7 +30,7 @@ class StateManager:
         if not os.path.exists(self.state_path):
             return {}
         try:
-            with open(self.state_path, "r", encoding="utf-8") as f:
+            with open(self.state_path, encoding="utf-8") as f:
                 return json.load(f)
         except (json.JSONDecodeError, OSError) as e:
             logger.warn(f"Não foi possível carregar o estado anterior: {e}. Iniciando com estado vazio.")

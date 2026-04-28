@@ -9,7 +9,7 @@ Gera dois arquivos JSON na pasta ``target/`` após cada execução:
 """
 import json
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from dfg.logging import logger
 
@@ -32,7 +32,7 @@ class ArtifactManager:
         os.makedirs(self.target_dir, exist_ok=True)
 
     def _utc_now_iso(self) -> str:
-        return datetime.now(tz=timezone.utc).isoformat()
+        return datetime.now(tz=UTC).isoformat()
 
     def save_manifest(self, models_registry: dict, dependencies_map: dict) -> None:
         """

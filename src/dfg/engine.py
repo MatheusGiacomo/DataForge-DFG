@@ -101,11 +101,11 @@ class DFGEngine:
 
         try:
             credentials = profiles[profile_name]["outputs"][target_name]
-        except KeyError:
+        except KeyError as err:
             raise ValueError(
                 f"Target '{target_name}' não encontrado no profile '{profile_name}' "
                 f"do profiles.toml."
-            )
+            ) from err
 
         config["targets"] = {target_name: credentials}
         return config
@@ -201,7 +201,7 @@ class DFGEngine:
         """Lê, compila e registra um modelo SQL no DAG."""
         model_name = filename[:-4]
         try:
-            with open(filepath, "r", encoding="utf-8") as f:
+            with open(filepath, encoding="utf-8") as f:
                 raw_sql = f.read()
 
             compilation = self.compiler.compile(raw_sql, model_name)
@@ -230,7 +230,7 @@ class DFGEngine:
 
             yaml_path = os.path.join(self.models_dir, filename)
             try:
-                with open(yaml_path, "r", encoding="utf-8") as f:
+                with open(yaml_path, encoding="utf-8") as f:
                     metadata = yaml.safe_load(f)
 
                 if not metadata or "models" not in metadata:
@@ -608,7 +608,7 @@ class DFGEngine:
         for file_name in snapshot_files:
             file_path = os.path.join(self.snapshots_dir, file_name)
             try:
-                with open(file_path, "r", encoding="utf-8") as f:
+                with open(file_path, encoding="utf-8") as f:
                     raw_sql = f.read()
 
                 snapshot_data = self.compiler.parse_snapshot(raw_sql)

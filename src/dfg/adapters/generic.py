@@ -12,6 +12,8 @@ Nota sobre gerenciamento de cursores:
     o padrão try/finally para garantir o fechamento seguro em
     qualquer driver.
 """
+import contextlib
+
 from dfg.adapters.base import BaseAdapter
 from dfg.logging import logger
 
@@ -89,10 +91,8 @@ class GenericDBAPIAdapter(BaseAdapter):
 
             # Habilita autocommit quando o driver suporta (evita transações abertas)
             if hasattr(self.conn, "autocommit"):
-                try:
+                with contextlib.suppress(Exception):
                     self.conn.autocommit = True
-                except Exception:
-                    pass  # Alguns drivers não permitem setar após conexão
 
             logger.info(f"Conexão estabelecida via '{self._driver_name}'.")
         except Exception as e:
@@ -113,10 +113,8 @@ class GenericDBAPIAdapter(BaseAdapter):
                 # Comandos DDL/DML (CREATE, UPDATE, DELETE, …) não retornam linhas
                 return None
         finally:
-            try:
+            with contextlib.suppress(Exception):
                 cursor.close()
-            except Exception:
-                pass
 
     def close(self) -> None:
         """Fecha a conexão e libera recursos."""
@@ -220,7 +218,5 @@ class GenericDBAPIAdapter(BaseAdapter):
             if not getattr(self.conn, "autocommit", False):
                 self.conn.commit()
         finally:
-            try:
+            with contextlib.suppress(Exception):
                 cursor.close()
-            except Exception:
-                pass
