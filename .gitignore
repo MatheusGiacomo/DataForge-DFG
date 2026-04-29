@@ -108,6 +108,6 @@ Teste
 ROADMAP.md
 REFATORACAO.md
 tests_first_project
-pagination.py
+
 cloud.py
-database.py
+pagination.py

@@ -107,7 +107,7 @@ class DFGEngine:
                 f"Target '{target_name}' não encontrado no profile '{profile_name}' "
                 f"do profiles.toml."
             ) from err
-        
+
         credentials = _resolve_env(credentials)
 
         config["targets"] = {target_name: credentials}
