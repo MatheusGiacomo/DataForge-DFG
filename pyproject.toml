@@ -50,11 +50,11 @@ dev = [
 dfg = "dfg.cli:main"
 
 [project.urls]
-Homepage      = "https://github.com/seu-usuario/dataforge"
-Documentation = "https://github.com/seu-usuario/dataforge/blob/main/DOCUMENTACAO.md"
-Repository    = "https://github.com/seu-usuario/dataforge"
-"Bug Tracker" = "https://github.com/seu-usuario/dataforge/issues"
-Changelog     = "https://github.com/seu-usuario/dataforge/blob/main/CHANGELOG.md"
+Homepage      = "https://github.com/MatheusGiacomo/DataForge-DFG"
+Documentation = "https://github.com/MatheusGiacomo/DataForge-DFG/blob/main/DOCUMENTACAO.md"
+Repository    = "https://github.com/MatheusGiacomo/DataForge-DFG"
+"Bug Tracker" = "https://github.com/MatheusGiacomo/DataForge-DFG/issues"
+Changelog     = "https://github.com/MatheusGiacomo/DataForge-DFG/blob/main/CHANGELOG.md"
 
 [tool.setuptools.packages.find]
 where   = ["src"]
