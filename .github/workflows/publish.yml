@@ -28,7 +28,7 @@ jobs:
         run: twine check dist/*
 
       - name: Publica no PyPI
-        run: twine upload dist/*
+        run: twine upload dist/* --verbose
         env:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
