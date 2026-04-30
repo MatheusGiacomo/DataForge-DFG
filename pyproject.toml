@@ -12,7 +12,7 @@ requires-python = ">=3.11"
 keywords        = ["elt", "etl", "data", "pipeline", "sql", "analytics", "data-engineering"]
 
 authors = [
-    { name = "Matheus", email = "matheusdigiacomo12@email.com" },
+    { name = "Matheus Di Giacomo", email = "matheusdigiacomo12@email.com" },
 ]
 
 classifiers = [
