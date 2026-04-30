@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name            = "dataforge-dfg"
-version         = "0.1.0"
+version         = "0.2.0"
 description     = "A lightweight ELT framework in pure Python — SQL transformations, Python ingestion, data contracts and snapshots in a single CLI tool"
 readme          = "README.md"
 license         = { file = "LICENSE" }
