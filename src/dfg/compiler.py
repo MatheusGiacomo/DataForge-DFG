@@ -7,6 +7,9 @@ Responsabilidades:
 - Extrair metadados de configuração ({{ config(...) }})
 - Rastrear dependências ({{ ref('model') }})
 - Fazer parsing de blocos {% snapshot %} ... {% endsnapshot %}
+- Expor variáveis de runtime via {{ var('nome', default) }} (v0.3.0)
+- Injetar macros globais carregadas de macros/*.sql (v0.4.0)
+- Compilar arquivos de análise de analysis/*.sql (v0.4.0)
 """
 import re
 
@@ -19,35 +22,35 @@ class ModelContext:
     """
     Contexto de execução injetado nos templates Jinja2.
 
-    Expõe as funções `ref()` e `config()` que o autor do modelo
-    pode usar diretamente no SQL, sem importações extras.
+    Expõe ref(), config() e var() que o autor do modelo pode usar
+    diretamente no SQL, sem importações extras.
     """
 
-    def __init__(self, model_name: str, target_schema: str):
+    def __init__(self, model_name: str, target_schema: str, runtime_vars: dict | None = None):
         self.model_name = model_name
         self.target_schema = target_schema
         self.model_config: dict = {}
         self.dependencies: list[str] = []
+        self._vars: dict = runtime_vars or {}
 
     def ref(self, referenced_model: str) -> str:
-        """
-        Macro {{ ref('nome_da_tabela') }}.
-
-        Registra a dependência e retorna o nome da tabela para ser
-        interpolado no SQL final.
-        """
+        """Macro {{ ref('nome') }}: registra dependência e retorna o nome da tabela."""
         self.dependencies.append(referenced_model)
         return referenced_model
 
     def config(self, **kwargs) -> str:
-        """
-        Macro {{ config(materialized='table') }}.
-
-        Armazena as configurações do modelo. Retorna string vazia
-        para que o Jinja não insira 'None' no SQL renderizado.
-        """
+        """Macro {{ config(...) }}: armazena configuração e retorna string vazia."""
         self.model_config.update(kwargs)
         return ""
+
+    def var(self, key: str, default=None):
+        """
+        Macro {{ var('nome', default) }}: acessa variáveis de runtime do --var.
+
+        Uso no modelo SQL:
+            WHERE data >= '{{ var("data_inicio", "2024-01-01") }}'
+        """
+        return self._vars.get(key, default)
 
 
 class SQLCompiler:
@@ -57,44 +60,66 @@ class SQLCompiler:
     Parâmetros
     ----------
     target_schema : str
-        Schema de destino que será disponibilizado como variável
-        nos templates ({{ target_schema }}).
+        Schema de destino disponibilizado como variável nos templates.
+    runtime_vars : dict | None
+        Variáveis passadas via --var no CLI. Acessíveis via {{ var('nome') }}.
+    macro_globals : dict | None
+        Macros carregadas pelo MacroLoader. Injetadas como globals no env.
     """
 
-    def __init__(self, target_schema: str = "public"):
+    def __init__(
+        self,
+        target_schema: str = "public",
+        runtime_vars: dict | None = None,
+        macro_globals: dict | None = None,
+    ):
         self.target_schema = target_schema
+        self.runtime_vars = runtime_vars or {}
+
         self.env = jinja2.Environment(
             loader=jinja2.BaseLoader(),
             trim_blocks=True,
             lstrip_blocks=True,
-            # StrictUndefined: falha imediatamente em variáveis não definidas,
-            # evitando bugs silenciosos por typos nos templates.
+            # StrictUndefined: falha em variáveis não definidas para evitar
+            # bugs silenciosos por typos nos templates.
             undefined=jinja2.StrictUndefined,
         )
 
+        # Injeta macros como globals do ambiente Jinja2.
+        # Isso as torna disponíveis em TODOS os templates sem import explícito.
+        if macro_globals:
+            self.env.globals.update(macro_globals)
+
+    def _make_context(self, model_name: str) -> ModelContext:
+        return ModelContext(
+            model_name=model_name,
+            target_schema=self.target_schema,
+            runtime_vars=self.runtime_vars,
+        )
+
+    def _render(self, template_str: str, context: ModelContext) -> str:
+        """Renderiza um template com o contexto fornecido."""
+        template = self.env.from_string(template_str)
+        return template.render(
+            ref=context.ref,
+            config=context.config,
+            var=context.var,
+            target_schema=self.target_schema,
+        )
+
     # ------------------------------------------------------------------
-    # API Pública
+    # API Pública — Modelos SQL
     # ------------------------------------------------------------------
 
     def compile(self, sql_raw: str, model_name: str) -> dict:
         """
         Compila um arquivo SQL com Jinja2 e extrai seus metadados.
 
-        Retorna
-        -------
-        dict com chaves:
-            - ``sql``: SQL puro, pronto para execução
-            - ``depends_on``: lista de modelos referenciados via ref()
-            - ``config``: dicionário de configuração (materialized, unique_key, …)
+        Retorna dict com: sql, depends_on, config.
         """
-        context = ModelContext(model_name, self.target_schema)
+        context = self._make_context(model_name)
         try:
-            template = self.env.from_string(sql_raw)
-            sql_compiled = template.render(
-                ref=context.ref,
-                config=context.config,
-                target_schema=self.target_schema,
-            )
+            sql_compiled = self._render(sql_raw, context)
             return {
                 "sql": sql_compiled.strip(),
                 "depends_on": list(set(context.dependencies)),
@@ -111,15 +136,10 @@ class SQLCompiler:
             raise
 
     def render(self, sql_raw: str) -> str:
-        """
-        Renderização simples de Jinja2 sem contexto de modelo.
-
-        Usado internamente pelo parse_snapshot para limpar as tags
-        do SQL interno do bloco snapshot antes de executá-lo.
-        """
+        """Renderização simples sem contexto de modelo (usado internamente)."""
+        context = self._make_context("__render__")
         try:
-            template = self.env.from_string(sql_raw)
-            return template.render(target_schema=self.target_schema).strip()
+            return self._render(sql_raw, context).strip()
         except jinja2.exceptions.TemplateSyntaxError as e:
             logger.error(f"Erro de sintaxe Jinja ao renderizar SQL (linha {e.lineno}): {e.message}")
             raise
@@ -127,64 +147,83 @@ class SQLCompiler:
             logger.error(f"Erro inesperado ao renderizar SQL: {e}")
             raise
 
-    def parse_snapshot(self, raw_sql: str) -> dict | None:
+    # ------------------------------------------------------------------
+    # API Pública — Arquivos de Análise (v0.4.0)
+    # ------------------------------------------------------------------
+
+    def compile_analysis(self, sql_raw: str, analysis_name: str) -> str:
         """
-        Analisa um arquivo de snapshot no formato:
+        Compila um arquivo de análise ad-hoc (analysis/*.sql).
 
-        .. code-block:: sql
+        Análises têm acesso a ref(), var() e macros — mas não a config().
+        O resultado é apenas SQL compilado (sem materialização no banco).
 
-            {% snapshot nome_do_snapshot %}
-            {{ config(unique_key='id', strategy='timestamp', updated_at='updated_at') }}
-            SELECT * FROM {{ ref('stg_users') }}
-            {% endsnapshot %}
+        Parâmetros
+        ----------
+        sql_raw : str
+            Conteúdo bruto do arquivo .sql.
+        analysis_name : str
+            Nome do arquivo de análise (para mensagens de erro).
 
         Retorna
         -------
-        dict com chaves:
-            - ``snapshot_name``: nome do snapshot
-            - ``config``: dicionário de configuração extraído de {{ config(...) }}
-            - ``compiled_sql``: SQL da query SELECT compilado (Jinja resolvido)
-
-        Retorna ``None`` se o arquivo não contiver um bloco snapshot válido.
+        str
+            SQL puro, pronto para execução manual ou visualização.
         """
-        # Extrai o bloco snapshot completo
-        snapshot_pattern = r"\{%\s*snapshot\s+(\w+)\s*%\}(.*?)\{%\s*endsnapshot\s*%\}"
-        match = re.search(snapshot_pattern, raw_sql, re.DOTALL)
+        context = self._make_context(analysis_name)
+        try:
+            return self._render(sql_raw, context).strip()
+        except jinja2.exceptions.TemplateSyntaxError as e:
+            logger.error(
+                f"Erro de sintaxe Jinja na análise '{analysis_name}' "
+                f"(linha {e.lineno}): {e.message}"
+            )
+            raise
+        except Exception as e:
+            logger.error(f"Erro inesperado ao compilar análise '{analysis_name}': {e}")
+            raise
 
+    # ------------------------------------------------------------------
+    # API Pública — Snapshots
+    # ------------------------------------------------------------------
+
+    def parse_snapshot(self, raw_sql: str) -> dict | None:
+        """
+        Analisa um arquivo de snapshot:
+
+            {% snapshot nome %}
+            {{ config(unique_key='id', updated_at='updated_at') }}
+            SELECT * FROM {{ ref('stg_model') }}
+            {% endsnapshot %}
+
+        Retorna None se não encontrar um bloco snapshot válido.
+        """
+        snapshot_pattern = re.compile(
+            r"\{%\s*snapshot\s+(\w+)\s*%\}(.*?)\{%\s*endsnapshot\s*%\}",
+            re.DOTALL,
+        )
+        match = snapshot_pattern.search(raw_sql)
         if not match:
             return None
 
         snapshot_name = match.group(1)
         inner_content = match.group(2)
 
-        # Extrai o bloco {{ config(...) }} e seus pares chave=valor
-        config_pattern = r"\{\{\s*config\((.*?)\)\s*\}\}"
-        config_match = re.search(config_pattern, inner_content, re.DOTALL)
+        config_pattern = re.compile(r"\{\{\s*config\((.*?)\)\s*\}\}", re.DOTALL)
+        config_match = config_pattern.search(inner_content)
 
         config_dict: dict = {}
         if config_match:
             config_str = config_match.group(1)
-            # Captura pares: chave='valor' ou chave="valor"
             for key, value in re.findall(r"(\w+)\s*=\s*['\"]([^'\"]+)['\"]", config_str):
                 config_dict[key] = value
-
-            # Remove o bloco config do conteúdo para isolar a query SELECT
-            source_sql = re.sub(config_pattern, "", inner_content, flags=re.DOTALL).strip()
+            source_sql = config_pattern.sub("", inner_content).strip()
         else:
             source_sql = inner_content.strip()
 
-        # Usa o método render() para resolver referências Jinja dentro da query
-        # (ex: {{ ref('stg_model') }}) antes de entregar ao SnapshotRunner.
-        # Nota: usamos um ModelContext temporário para registrar dependências
-        # sem precisar de um nome de modelo real.
-        context = ModelContext(snapshot_name, self.target_schema)
+        context = self._make_context(snapshot_name)
         try:
-            template = self.env.from_string(source_sql)
-            compiled_sql = template.render(
-                ref=context.ref,
-                config=context.config,
-                target_schema=self.target_schema,
-            ).strip()
+            compiled_sql = self._render(source_sql, context).strip()
         except Exception as e:
             logger.error(f"Erro ao compilar SQL do snapshot '{snapshot_name}': {e}")
             raise
